@@ -1,0 +1,22 @@
+name: PR review digest
+
+on:
+  schedule:
+    # Cron times are UTC. 13:00 UTC is 9:00 EDT / 6:00 PDT.
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Post digest
+        env:
+          GH_TOKEN: ${{ secrets.GH_READ_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python digest.py
