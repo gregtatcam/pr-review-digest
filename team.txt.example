@@ -1,0 +1,6 @@
+# GitHub logins of team members, one per line, for digest.py. A PR is
+# included when its author or any of its reviewers is listed here. Case
+# doesn't matter. Copy this file to team.txt (which git ignores) or set the
+# TEAM environment variable to a comma-separated list instead.
+alice
+bob

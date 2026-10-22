@@ -16,7 +16,16 @@ jobs:
         with:
           python-version: "3.12"
       - name: Post digest
+        # Settings come from the repository's Actions variables (Settings >
+        # Secrets and variables > Actions > Variables) and secrets; see
+        # README.txt.
         env:
+          GH_REPOS: ${{ vars.GH_REPOS }}
+          TEAM: ${{ vars.TEAM }}
+          JIRA_URL: ${{ vars.JIRA_URL }}
+          JIRA_PROJECTS: ${{ vars.JIRA_PROJECTS }}
           GH_TOKEN: ${{ secrets.GH_READ_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python digest.py
