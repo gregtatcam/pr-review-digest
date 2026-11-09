@@ -35,6 +35,16 @@ STATUS_TEXT = {
     "none": "not reviewed yet",
 }
 
+# Two overlapping pages, drawn with lines so it stays crisp at any size.
+COPY_ICON = (
+    '<svg viewBox="0 0 24 24" width="20" height="20" fill="none"'
+    ' stroke="currentColor" stroke-width="2" stroke-linejoin="round"'
+    ' aria-hidden="true">'
+    '<rect x="9" y="9" width="12" height="12" rx="2"/>'
+    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'
+    "</svg>"
+)
+
 PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -67,11 +77,20 @@ PAGE = """<!DOCTYPE html>
   .problem {{ color: #cf222e; font-weight: 600; }}
   .reviewer {{ white-space: nowrap; }}
   .nowrap {{ white-space: nowrap; }}
-  /* Hovering a title shows the PR description in a scrollable popup. The
-     popup is a child of the title, so moving the mouse into it to scroll
-     keeps the hover and the popup open. */
-  .title {{ position: relative; display: inline-block; cursor: default; }}
-  .title:hover {{ text-decoration: underline dotted; }}
+  /* Small inline icon buttons: copy the branch name, show the description. */
+  .icon {{ border: none; background: none; padding: 0 2px; margin-left: 4px;
+           cursor: pointer; color: #59636e; font: inherit; line-height: 1;
+           vertical-align: middle; }}
+  .icon:hover {{ color: #0969da; }}
+  .copy {{ margin-left: 6px; }}
+  .copy svg {{ display: block; }}
+  .info {{ display: inline-block; width: 15px; height: 15px; border-radius: 50%;
+           border: 1px solid currentColor; font: italic bold 11px Georgia, serif;
+           line-height: 13px; text-align: center; }}
+  .copied {{ color: #1a7f37; font-size: 12px; margin-left: 4px; }}
+  /* Clicking the "i" icon shows the PR description in a scrollable popup,
+     positioned relative to the title line. */
+  .title {{ position: relative; display: inline-block; }}
   .desc {{ display: none; position: absolute; left: 0; top: 100%; z-index: 10;
            width: 640px; max-width: 80vw; max-height: 360px; overflow-y: auto;
            background: #fff; border: 1px solid #d1d9e0; border-radius: 6px;
@@ -80,7 +99,7 @@ PAGE = """<!DOCTYPE html>
            word-break: break-word; }}
   .desc.above {{ top: auto; bottom: 100%; margin-top: 0; margin-bottom: 2px; }}
   .desc.empty {{ color: #59636e; font-style: italic; }}
-  .title:hover .desc {{ display: block; }}
+  .desc.open {{ display: block; }}
 </style>
 </head>
 <body>
@@ -147,14 +166,42 @@ PAGE = """<!DOCTYPE html>
   // Checkboxes and the date apply as soon as they change; text fields on Enter.
   document.querySelectorAll("#filters input[type=checkbox], #filters input[type=date]")
     .forEach(el => el.addEventListener("change", () => el.form.submit()));
-  // Open the description popup above the title when there isn't room below.
-  document.querySelectorAll(".title").forEach(el => {{
-    el.addEventListener("mouseenter", () => {{
-      const desc = el.querySelector(".desc");
-      const below = window.innerHeight - el.getBoundingClientRect().bottom;
-      const above = el.getBoundingClientRect().top;
-      desc.classList.toggle("above", below < 200 && above > below);
+  // The copy icon puts the branch name on the clipboard and says so briefly.
+  document.querySelectorAll(".copy").forEach(btn => {{
+    btn.addEventListener("click", async () => {{
+      const note = btn.nextElementSibling;
+      try {{
+        await navigator.clipboard.writeText(btn.dataset.branch);
+        note.textContent = "Copied";
+      }} catch (e) {{
+        note.textContent = "Copy failed";
+      }}
+      setTimeout(() => {{ note.textContent = ""; }}, 1500);
     }});
+  }});
+  // The "i" icon toggles the description popup; it opens above the title
+  // when there isn't room below. Clicking elsewhere or pressing Escape
+  // closes it.
+  const closeDescs = () => document.querySelectorAll(".desc.open")
+    .forEach(d => d.classList.remove("open"));
+  document.querySelectorAll(".info").forEach(btn => {{
+    btn.addEventListener("click", () => {{
+      const title = btn.closest(".title");
+      const desc = title.querySelector(".desc");
+      const wasOpen = desc.classList.contains("open");
+      closeDescs();
+      if (wasOpen) return;
+      const below = window.innerHeight - title.getBoundingClientRect().bottom;
+      const above = title.getBoundingClientRect().top;
+      desc.classList.toggle("above", below < 200 && above > below);
+      desc.classList.add("open");
+    }});
+  }});
+  document.addEventListener("click", e => {{
+    if (!e.target.closest(".title")) closeDescs();
+  }});
+  document.addEventListener("keydown", e => {{
+    if (e.key === "Escape") closeDescs();
   }});
 </script>
 </body>
@@ -191,17 +238,30 @@ def cache_note():
 
 
 def pr_cell(row):
-    parts = [f'<a href="{escape(row["url"])}">{escape(row["pr_label"])}</a>']
+    parts = [
+        f'<a href="{escape(row["url"])}" target="_blank" rel="noopener">'
+        f'{escape(row["pr_label"])}</a>'
+    ]
     for p in row["problems"]:
         parts.append(f' <span class="problem">{digest.PROBLEM_EMOJI[p]} {p}</span>')
-    parts.append(f'<div class="branch">{escape(row["branch"])}</div>')
+    branch = escape(row["branch"])
+    parts.append(
+        f'<div class="branch">{branch}'
+        f'<button type="button" class="icon copy" data-branch="{branch}"'
+        f' title="Copy the branch name">{COPY_ICON}</button>'
+        '<span class="copied"></span></div>'
+    )
     # Drop the HTML comments from the PR template; GitHub doesn't show them.
     body = HTML_COMMENT.sub("", row["body"]).strip()
     desc = (
         f'<div class="desc">{escape(body)}</div>' if body
         else '<div class="desc empty">(no description)</div>'
     )
-    parts.append(f'<div><span class="title">{escape(row["title"])}{desc}</span></div>')
+    parts.append(
+        f'<div><span class="title">{escape(row["title"])}'
+        '<button type="button" class="icon info" title="Show the description">'
+        f"i</button>{desc}</span></div>"
+    )
     if row["jira"]:
         links = " ".join(
             f'<a href="{digest.JIRA_BROWSE}{escape(k)}">{escape(k)}</a>'

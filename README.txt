@@ -133,8 +133,10 @@ and "not approved". Check boxes and the date apply immediately; after
 typing in a text field press "Apply". "Force refresh" fetches new data from
 GitHub regardless of the cache.
 
-Hovering over a PR title pops up the PR's description. Move the mouse into
-the popup to scroll a long description; it closes when the mouse leaves.
+Clicking the PR number (e.g. "widgets#123") opens the PR on GitHub in a
+new tab. The icon after the branch name copies the branch name to the
+clipboard. The "i" icon after the title pops up the PR's description;
+click it again, click elsewhere, or press Escape to close it.
 
 Caching
 -------
