@@ -59,8 +59,10 @@ Optional, for the Jira tickets column:
 GH_REPOS lists the repositories to scan as owner/name, comma separated.
 JIRA_URL is the Jira site: links to its tickets in a PR description are
 shown with the PR. JIRA_PROJECTS lists the project keys whose ticket keys
-(PROJ-123) in a PR title or branch name are shown. Without the Jira
-settings no tickets are shown.
+(PROJ-123, or PROJ123 without the hyphen) in a PR title or branch name are
+shown. When a PR has no ticket link and no key in its title or branch, the
+keys named in its description are shown instead. Without the Jira settings
+no tickets are shown.
 
 Optional, for the web page's ticket summary popup (the "i" icon next to a
 ticket), which reads the ticket from Jira:
