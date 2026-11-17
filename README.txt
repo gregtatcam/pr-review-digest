@@ -62,6 +62,28 @@ shown with the PR. JIRA_PROJECTS lists the project keys whose ticket keys
 (PROJ-123) in a PR title or branch name are shown. Without the Jira
 settings no tickets are shown.
 
+Optional, for the web page's ticket summary popup (the "i" icon next to a
+ticket), which reads the ticket from Jira:
+
+  export JIRA_EMAIL='me@example.com'
+  export JIRA_TOKEN='<a Jira API token>'
+
+The popup shows a few sentences on what the ticket is about, written by the
+claude command (Claude Code, https://claude.com/claude-code), which must be
+installed and logged in. The ticket's title and description are sent to
+Claude for this. A summary is written once, the first time a ticket's popup
+opens, and saved in ~/.cache/jira-digest/summaries.json; it isn't rewritten
+when the ticket changes, so delete the ticket's entry there (or the file) to
+have it written again. Without the claude command the popup shows the ticket
+description as is.
+
+The saved summaries are shared with jira-digest
+(https://github.com/gregtatcam/jira-digest), which shows them too; either
+one writes a summary the other then reuses. A ticket that jira-digest has
+already fetched (~/.cache/jira-digest/tickets.json) is summarized from that
+copy, without asking Jira, so JIRA_EMAIL and JIRA_TOKEN are only needed for
+the other tickets. ticket_summary.py is the same file in both projects.
+
 Running in the terminal
 -----------------------
 

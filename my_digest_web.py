@@ -10,23 +10,36 @@ one reloads the page; Force refresh fetches from GitHub even if the cache is
 under 4 hours old.
 
 Environment: the same variables as my_digest.py (GH_REPOS, GH_TOKEN, and the
-optional JIRA_URL and JIRA_PROJECTS); see README.txt.
+optional JIRA_URL and JIRA_PROJECTS); see README.txt. Showing a ticket's
+summary also needs the claude command (Claude Code), which writes it, and
+JIRA_EMAIL and JIRA_TOKEN, to read the ticket from Jira; see
+ticket_summary.py.
 """
 
 import argparse
+import base64
+import json
 import os
 import re
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import my_digest as digest
+import ticket_summary
 
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+TICKET_KEY = re.compile(r"[A-Za-z][A-Za-z0-9]+-\d+")
+
+# The tickets that jira-digest (a sibling project) has fetched and saved. A
+# ticket found there is summarized without asking Jira for it.
+JIRA_DIGEST_TICKETS = ticket_summary.SUMMARY_FILE.with_name("tickets.json")
 
 STATUS_TEXT = {
     "approved": "approved",
@@ -94,8 +107,9 @@ PAGE = """<!DOCTYPE html>
            border: 1px solid currentColor; font: italic bold 11px Georgia, serif;
            line-height: 13px; text-align: center; }}
   .copied {{ color: #1a7f37; font-size: 12px; margin-left: 4px; }}
-  /* Clicking the "i" icon shows the PR description in a scrollable popup,
-     positioned relative to the title line. */
+  /* Clicking the "i" icon shows the PR description (or, next to a ticket,
+     the ticket's description) in a scrollable popup, positioned relative
+     to the title or ticket it belongs to. */
   .title {{ position: relative; display: inline-block; }}
   .desc {{ display: none; position: absolute; left: 0; top: 100%; z-index: 10;
            width: 640px; max-width: 80vw; max-height: 360px; overflow-y: auto;
@@ -106,6 +120,7 @@ PAGE = """<!DOCTYPE html>
   .desc.above {{ top: auto; bottom: 100%; margin-top: 0; margin-bottom: 2px; }}
   .desc.empty {{ color: #59636e; font-style: italic; }}
   .desc.open {{ display: block; }}
+  .ticket {{ margin-right: 8px; }}
 </style>
 </head>
 <body>
@@ -220,9 +235,27 @@ PAGE = """<!DOCTYPE html>
   }});
   // The "i" icon toggles the description popup; it opens above the title
   // when there isn't room below. Clicking elsewhere or pressing Escape
-  // closes it.
+  // closes it. A ticket's summary is fetched from the server the first time
+  // its popup opens.
   const closeDescs = () => document.querySelectorAll(".desc.open")
     .forEach(d => d.classList.remove("open"));
+  const loadTicket = async desc => {{
+    if (desc.dataset.loaded) return;
+    desc.dataset.loaded = "1";
+    try {{
+      const resp = await fetch("/ticket?key=" + encodeURIComponent(desc.dataset.key));
+      const ticket = await resp.json();
+      if (ticket.error) throw new Error(ticket.error);
+      const head = document.createElement("strong");
+      head.textContent = ticket.title;
+      desc.textContent = "";
+      desc.append(head, "\\n\\n" + ticket.text);
+      desc.classList.remove("empty");
+    }} catch (e) {{
+      desc.textContent = e.message;
+      delete desc.dataset.loaded;  // try again the next time it opens
+    }}
+  }};
   document.querySelectorAll(".info").forEach(btn => {{
     btn.addEventListener("click", () => {{
       const title = btn.closest(".title");
@@ -234,6 +267,7 @@ PAGE = """<!DOCTYPE html>
       const above = title.getBoundingClientRect().top;
       desc.classList.toggle("above", below < 200 && above > below);
       desc.classList.add("open");
+      if (desc.dataset.key) loadTicket(desc);
     }});
   }});
   document.addEventListener("click", e => {{
@@ -302,12 +336,86 @@ def pr_cell(row):
         f"i</button>{desc}</span></div>"
     )
     if row["jira"]:
-        links = " ".join(
+        links = "".join(
+            '<span class="title ticket">'
             f'<a href="{digest.JIRA_BROWSE}{escape(k)}">{escape(k)}</a>'
+            '<button type="button" class="icon info"'
+            ' title="Show a summary of the ticket">i</button>'
+            f'<div class="desc empty" data-key="{escape(k)}">Summarizing...</div>'
+            "</span>"
             for k in row["jira"]
         )
         parts.append(f"<div>{links}</div>")
     return "".join(parts)
+
+
+def cached_ticket(key):
+    """Return the (title, description) of a ticket that jira-digest has
+    fetched and saved, or None when it isn't among them."""
+    try:
+        tickets = json.loads(JIRA_DIGEST_TICKETS.read_text())["tickets"]
+        for ticket in tickets:
+            if ticket["key"] == key:
+                return (
+                    ticket["summary"],
+                    ticket_summary.plain_text(ticket["description"]),
+                )
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def fetch_ticket(key):
+    """Return the (title, description) of a ticket, read from Jira. Raises
+    RuntimeError when it can't be read."""
+    email = os.environ.get("JIRA_EMAIL", "")
+    token = os.environ.get("JIRA_TOKEN", "")
+    if not (digest.JIRA_SITE and email and token):
+        raise RuntimeError("Set JIRA_URL, JIRA_EMAIL, and JIRA_TOKEN to show"
+                           " ticket summaries; see README.txt.")
+    # API version 2 returns the description as plain wiki text.
+    req = urllib.request.Request(
+        f"{digest.JIRA_SITE}/rest/api/2/issue/{quote(key)}"
+        "?fields=summary,description",
+        headers={
+            "Authorization": "Basic "
+            + base64.b64encode(f"{email}:{token}".encode()).decode(),
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            fields = json.load(resp)["fields"]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RuntimeError(f"{key} was not found, or this Jira account"
+                               " can't see it.") from e
+        raise RuntimeError(f"Jira returned {e.code} {e.reason} for {key}.") from e
+    except (OSError, ValueError, KeyError) as e:
+        raise RuntimeError(f"Fetching {key} from Jira failed: {e}") from e
+    return fields.get("summary") or "", (fields.get("description") or "").strip()
+
+
+def ticket_popup(key):
+    """Return what the ticket popup shows, as {"title", "text"}, or
+    {"error"}. The text is the ticket's saved summary; without one, the
+    ticket is taken from jira-digest's saved tickets or else read from Jira,
+    and its summary is written and saved."""
+    found = ticket_summary.saved(key)
+    if found:
+        return found
+    try:
+        title, description = cached_ticket(key) or fetch_ticket(key)
+    except RuntimeError as e:
+        return {"error": str(e)}
+    try:
+        return ticket_summary.summary(key, title, description)
+    except RuntimeError as e:
+        return {
+            "title": title,
+            "text": f"(No summary: {e}. The ticket description follows.)"
+                    f"\n\n{description}",
+        }
 
 
 def reviewers_cell(row):
@@ -405,10 +513,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        query = parse_qs(url.query)
+        if url.path == "/ticket":
+            self.send_ticket(first(query, "key").upper())
+            return
         if url.path != "/":
             self.send_error(404)
             return
-        query = parse_qs(url.query)
         if "force" in query:
             error = self.load(force=True)
             if not error:
@@ -426,6 +537,18 @@ class Handler(BaseHTTPRequestHandler):
         body = render(query, Handler.data, error).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_ticket(self, key):
+        """Answer the ticket popup's request with the ticket's summary as JSON."""
+        if not TICKET_KEY.fullmatch(key):
+            self.send_error(400)
+            return
+        body = json.dumps(ticket_popup(key)).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
