@@ -133,6 +133,12 @@ and "not approved". Check boxes and the date apply immediately; after
 typing in a text field press "Apply". "Force refresh" fetches new data from
 GitHub regardless of the cache.
 
+Clicking a column header sorts the table by that column; clicking it again
+reverses the order. "PR" sorts by repository and number, "Reviewers" by how
+many reviewers haven't approved yet, and "Latest activity" by date. The
+chosen sort is remembered in the browser, so it stays when a filter reloads
+the page.
+
 Clicking the PR number (e.g. "widgets#123") opens the PR on GitHub in a
 new tab. The icon after the branch name copies the branch name to the
 clipboard. The "i" icon after the title pops up the PR's description;

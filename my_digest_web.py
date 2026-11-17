@@ -71,6 +71,12 @@ PAGE = """<!DOCTYPE html>
   th, td {{ border: 1px solid #d1d9e0; padding: 6px 8px; vertical-align: top;
             text-align: left; }}
   th {{ background: #f6f8fa; position: sticky; top: 0; }}
+  /* Clicking a column header sorts by it; the arrow shows the direction. */
+  th.sortable {{ cursor: pointer; user-select: none; white-space: nowrap; }}
+  th.sortable:hover {{ color: #0969da; }}
+  th.sortable::after {{ content: "\\2195"; color: #afb8c1; margin-left: 4px; }}
+  th.sortable.asc::after {{ content: "\\25B2"; color: inherit; font-size: 10px; }}
+  th.sortable.desc::after {{ content: "\\25BC"; color: inherit; font-size: 10px; }}
   td.pr {{ max-width: 520px; }}
   .branch {{ font-family: ui-monospace, Menlo, monospace; font-size: 12px;
              color: #59636e; word-break: break-all; }}
@@ -156,9 +162,16 @@ PAGE = """<!DOCTYPE html>
 </form>
 <datalist id="logins">{logins}</datalist>
 <table>
-<thead><tr><th>PR</th><th>Milestone</th><th>Author</th><th>Reviewers</th>
-<th>Latest activity</th></tr></thead>
-<tbody>
+<thead><tr>
+<th class="sortable" title="Sort by repository and PR number">PR</th>
+<th class="sortable" title="Sort by milestone">Milestone</th>
+<th class="sortable" title="Sort by author">Author</th>
+<th class="sortable"
+    title="Sort by the number of reviewers who haven't approved">Reviewers</th>
+<th class="sortable" title="Sort by the date of the latest activity">
+  Latest activity</th>
+</tr></thead>
+<tbody id="rows">
 {rows}
 </tbody>
 </table>
@@ -166,6 +179,32 @@ PAGE = """<!DOCTYPE html>
   // Checkboxes and the date apply as soon as they change; text fields on Enter.
   document.querySelectorAll("#filters input[type=checkbox], #filters input[type=date]")
     .forEach(el => el.addEventListener("change", () => el.form.submit()));
+  // Clicking a column header sorts the rows by each cell's data-sort value;
+  // clicking it again reverses the order. The choice is kept in localStorage
+  // so it survives the reload a filter change causes.
+  const tbody = document.getElementById("rows");
+  const headers = [...document.querySelectorAll("th.sortable")];
+  const SORT_KEY = "pr-digest-sort";
+  const sortRows = (col, dir) => {{
+    const rows = [...tbody.rows].filter(r => r.cells.length === headers.length);
+    const sign = dir === "desc" ? -1 : 1;
+    rows.sort((a, b) => sign * a.cells[col].dataset.sort.localeCompare(
+      b.cells[col].dataset.sort, undefined, {{numeric: true, sensitivity: "base"}}));
+    rows.forEach(r => tbody.appendChild(r));
+    headers.forEach((h, i) => {{
+      h.classList.toggle("asc", i === col && dir === "asc");
+      h.classList.toggle("desc", i === col && dir === "desc");
+    }});
+  }};
+  headers.forEach((h, col) => h.addEventListener("click", () => {{
+    const dir = h.classList.contains("asc") ? "desc" : "asc";
+    sortRows(col, dir);
+    try {{ localStorage.setItem(SORT_KEY, col + ":" + dir); }} catch (e) {{}}
+  }}));
+  try {{
+    const [col, dir] = (localStorage.getItem(SORT_KEY) || "").split(":");
+    if (dir && headers[Number(col)]) sortRows(Number(col), dir);
+  }} catch (e) {{}}
   // The copy icon puts the branch name on the clipboard and says so briefly.
   document.querySelectorAll(".copy").forEach(btn => {{
     btn.addEventListener("click", async () => {{
@@ -281,16 +320,25 @@ def reviewers_cell(row):
     )
 
 
+def pending_reviews(row):
+    """Sort key for the Reviewers column: how many reviewers haven't approved,
+    then how many reviewers there are."""
+    pending = sum(1 for s, _ in row["reviewers"] if s != "approved")
+    return f"{pending}.{len(row['reviewers'])}"
+
+
 def table_rows(rows):
     if not rows:
         return '<tr><td colspan="5">No PRs match these filters.</td></tr>'
     return "\n".join(
         "<tr>"
-        f'<td class="pr">{pr_cell(r)}</td>'
-        f'<td class="nowrap">{escape(r["milestone"] or "-")}</td>'
-        f"<td>{escape(r['author'])}</td>"
-        f"<td>{reviewers_cell(r)}</td>"
-        f'<td class="nowrap">{escape(r["latest"])}</td>'
+        f'<td class="pr" data-sort="{escape(r["pr_label"])}">{pr_cell(r)}</td>'
+        f'<td class="nowrap" data-sort="{escape(r["milestone"])}">'
+        f'{escape(r["milestone"] or "-")}</td>'
+        f'<td data-sort="{escape(r["author"])}">{escape(r["author"])}</td>'
+        f'<td data-sort="{pending_reviews(r)}">{reviewers_cell(r)}</td>'
+        f'<td class="nowrap" data-sort="{escape(r["latest"])}">'
+        f'{escape(r["latest"])}</td>'
         "</tr>"
         for r in rows
     )
