@@ -70,8 +70,10 @@ MAX_CHARS = 9000
 HEADERS = ["PR", "Milestone", "Author", "Reviewers", "Latest activity"]
 
 # Jira tickets are taken from links to the JIRA_URL site in the PR body, and
-# from keys of the JIRA_PROJECTS that appear in the PR title or branch name.
-# Both settings are optional; without them no tickets are shown.
+# from keys of the JIRA_PROJECTS that appear in the PR title or branch name,
+# with or without the hyphen (PROJ-123 or PROJ123, as branch names often
+# have it). A PR with no ticket found that way gets the keys named in its
+# body. Both settings are optional; without them no tickets are shown.
 NEVER = re.compile(r"(?!)")  # matches nothing
 JIRA_SITE = os.environ.get("JIRA_URL", "").rstrip("/")
 JIRA_BROWSE = JIRA_SITE + "/browse/"
@@ -81,7 +83,7 @@ JIRA_URL = (
 )
 JIRA_PROJECTS = env_list("JIRA_PROJECTS")
 JIRA_KEY = (
-    re.compile(r"\b(?:" + "|".join(map(re.escape, JIRA_PROJECTS)) + r")-\d+\b", re.IGNORECASE)
+    re.compile(r"\b(" + "|".join(map(re.escape, JIRA_PROJECTS)) + r")-?(\d+)\b", re.IGNORECASE)
     if JIRA_PROJECTS else NEVER
 )
 
@@ -417,13 +419,17 @@ def pr_problems(pr):
 
 
 def jira_tickets(pr):
-    """Return Jira keys linked from the PR body, or named in its title or branch."""
-    keys = []
-    for match in JIRA_URL.finditer(pr["body"] or ""):
-        keys.append(match.group(1).upper())
-    for text in (pr["title"], pr["headRefName"]):
+    """Return Jira keys linked from the PR body, or named in its title or
+    branch. When none of those has one, keys named in the body are taken
+    instead; the body is the last resort because it also names tickets the
+    PR is not about."""
+    body = pr["body"] or ""
+    keys = [match.group(1).upper() for match in JIRA_URL.finditer(body)]
+    for text in (pr["title"], pr["headRefName"], body):
+        if text is body and keys:
+            break
         for match in JIRA_KEY.finditer(text or ""):
-            keys.append(match.group(0).upper())
+            keys.append(f"{match.group(1).upper()}-{match.group(2)}")
     return list(dict.fromkeys(keys))
 
 
