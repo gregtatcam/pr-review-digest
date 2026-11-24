@@ -8,6 +8,8 @@ Options:
   --date m-d-yy       Only PRs opened on or after this date, e.g. 10-5-26.
   --markdown          Print a Markdown table (for a Slack canvas).
   --force             Fetch from GitHub even if the cache is under 4 hours old.
+  --by-effort         List the PRs that are easiest to review first (see
+                      review_effort.py for how the effort is estimated).
   --author [A,B]      Only PRs by these authors (no list: me).
   --reviewer [A,B]    Only PRs where one of these is a reviewer, requested or
                       reviewed (no list: me). With both flags, PRs matching
@@ -53,6 +55,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+
+import review_effort
 
 def env_list(name):
     """The comma-separated environment variable NAME as a list of strings."""
@@ -105,7 +109,7 @@ MAX_TEXT = 3500
 # Fetched PR data is reused for 4 hours unless --force is given.
 CACHE_FILE = Path.home() / ".cache" / "pr-review-digest" / "prs.json"
 CACHE_MAX_AGE = 4 * 3600
-CACHE_VERSION = 3  # bump when DETAILS_QUERY's fields change
+CACHE_VERSION = 4  # bump when DETAILS_QUERY's fields change
 
 # TERM_PROGRAM values of terminals that support OSC 8 hyperlinks. Elsewhere
 # (e.g. Apple Terminal) the PR URL is printed on its own line instead.
@@ -152,6 +156,12 @@ query($ids: [ID!]!) {
       headRefOid
       headRefName
       mergeable
+      changedFiles
+      additions
+      deletions
+      files(first: 100) {
+        nodes { path additions deletions changeType }
+      }
       commits(last: 1) {
         nodes { commit { statusCheckRollup { state } } }
       }
@@ -321,6 +331,8 @@ def summarize_reviewers(pr):
             who["login"], {"last": None, "state": None, "approved_oid": None}
         )
         info["last"] = review["submittedAt"]
+        # The commit their latest review, of any kind, was made on.
+        info["last_oid"] = (review["commit"] or {}).get("oid")
         # A later plain comment does not undo an approval or change request.
         if review["state"] != "COMMENTED":
             info["state"] = review["state"]
@@ -433,20 +445,45 @@ def jira_tickets(pr):
     return list(dict.fromkeys(keys))
 
 
-def build_row(pr, reviewers):
-    """Return the table row as plain values; Slack cells are built from it."""
+def pr_size(pr):
+    """Return the PR's size as "12 files, 345 TLC" (TLC is the total lines
+    changed: added plus deleted), or "" for PR data saved before the size
+    was fetched."""
+    files = pr.get("changedFiles")
+    if files is None:
+        return ""
+    lines = pr.get("additions", 0) + pr.get("deletions", 0)
+    return f"{files} file{'' if files == 1 else 's'}, {lines} TLC"
+
+
+def build_row(pr, reviewers, me=None):
+    """Return the table row as plain values; Slack cells are built from it.
+    The review effort is estimated for the reviewer me (a lower-case login):
+    it is lower for a PR they reviewed before, and lowest when the PR has no
+    commits since their latest review."""
     title = TITLE_PREFIX.sub("", pr["title"]) + (" [draft]" if pr["isDraft"] else "")
     revs = []
+    my_status = None
     for login in sorted(reviewers, key=str.lower):
         info = reviewers[login]
         when = fmt_date(info["last"])
-        revs.append(
-            (
-                reviewer_status(info, pr["headRefOid"]),
-                f"{login} ({when})" if when else login,
-            )
-        )
+        status = reviewer_status(info, pr["headRefOid"])
+        if login.lower() == me and status != "none":
+            if status == "approved":
+                my_status = "approved"
+            elif info.get("last_oid") == pr["headRefOid"]:
+                my_status = "unchanged"
+            else:
+                my_status = "updated"
+        revs.append((status, f"{login} ({when})" if when else login))
+    size = pr_size(pr)
+    effort = review_effort.estimate(pr, my_status)
     return {
+        "effort": effort,
+        # The size and the effort score on one line, for the text outputs.
+        "size_effort": ", ".join(
+            part for part in (size, review_effort.label(effort)) if part
+        ),
         "pr_label": f"{pr['repo']}#{pr['number']}",
         "branch": pr["headRefName"],
         "url": pr["url"],
@@ -458,6 +495,7 @@ def build_row(pr, reviewers):
         "latest": fmt_date(pr["updatedAt"]),
         "jira": jira_tickets(pr),
         "problems": pr_problems(pr),
+        "size": size,
     }
 
 
@@ -492,6 +530,10 @@ def slack_row(row):
             {"type": "text", "text": "\n"},
             {"type": "link", "text": key, "url": JIRA_BROWSE + key},
         ]
+    if row["size_effort"]:
+        pr["elements"][0]["elements"].append(
+            {"type": "text", "text": "\n" + row["size_effort"]}
+        )
     revs = []
     for i, (status, label) in enumerate(row["reviewers"]):
         if i:
@@ -521,6 +563,7 @@ def row_chars(row):
         + sum(len(label) + 3 for _, label in row["reviewers"])
         + len(row["latest"])
         + sum(len(JIRA_BROWSE) + (2 * len(key)) + 1 for key in row["jira"])
+        + len(row["size_effort"]) + 1
     )
 
 
@@ -613,6 +656,11 @@ def text_table_rows(row, links=None):
     pr.append(clip(row["title"], PR_LINE_WIDTH))
     if row["jira"]:
         pr.append(clip(" ".join(row["jira"]), PR_LINE_WIDTH))
+    if row["size_effort"]:
+        pr.append(row["size_effort"])
+    if row["effort"]:
+        # What the effort score was made from.
+        pr.append(clip(row["effort"]["why"], PR_LINE_WIDTH))
     revs = [f"{STATUS_EMOJI[s][1]} {label}" for s, label in row["reviewers"]]
     revs = revs or ["no reviewers"]
     if len(row["branch"]) > PR_LINE_WIDTH and len(revs) > 1:
@@ -692,6 +740,8 @@ def markdown_report(title, rows):
         pr = (f"[{row['pr_label']}]({row['url']}){problems_emoji(row)} "
               f"`{md_escape(row['branch'])}` "
               f"{md_escape(row['title'])}")
+        if row["size_effort"]:
+            pr += f" ({row['size_effort']})"
         jira = ", ".join(f"[{k}]({JIRA_BROWSE}{k})" for k in row["jira"]) or "-"
         revs = ", ".join(
             f"{STATUS_EMOJI[s][1]} {md_escape(label)}" for s, label in row["reviewers"]
@@ -731,6 +781,11 @@ def parse_args():
     parser.add_argument("--markdown", action="store_true", help="print Markdown")
     parser.add_argument(
         "--force", action="store_true", help="fetch from GitHub even if cached"
+    )
+    parser.add_argument(
+        "--by-effort",
+        action="store_true",
+        help="list the PRs that are easiest to review first",
     )
     # With no value these mean me; a bare flag parses to an empty set.
     parser.add_argument(
@@ -824,7 +879,7 @@ def select_rows(data, args):
                         and approval_count(reviewers) >= 2):
                     continue
             if matches_people(pr, reviewers, authors, revs):
-                rows.append(build_row(pr, reviewers))
+                rows.append(build_row(pr, reviewers, me))
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     who = []
@@ -845,6 +900,9 @@ def main():
         sys.exit("GH_REPOS is not set; see README.txt")
     data = load_data(token, args.force)
     title, rows = select_rows(data, args)
+    if args.by_effort:
+        rows.sort(key=lambda row: row["effort"]["lines"] if row["effort"]
+                  else float("inf"))
     slack_token = os.environ.get("SLACK_BOT_TOKEN")
     webhook = os.environ.get("SLACK_WEBHOOK_URL")
 

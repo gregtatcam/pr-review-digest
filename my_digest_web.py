@@ -83,16 +83,25 @@ PAGE = """<!DOCTYPE html>
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ border: 1px solid #d1d9e0; padding: 6px 8px; vertical-align: top;
             text-align: left; }}
-  th {{ background: #f6f8fa; position: sticky; top: 0; }}
-  /* Clicking a column header sorts by it; the arrow shows the direction. */
+  /* The header stays on top of the rows that scroll under it (a PR title
+     is positioned, and would otherwise show through), but below an open
+     description popup. */
+  th {{ background: #f6f8fa; position: sticky; top: 0; z-index: 2; }}
+  /* Clicking a column header sorts by it; the arrow shows the direction.
+     The classes are sort-asc and sort-desc: "desc" alone is the hidden
+     description popup. */
   th.sortable {{ cursor: pointer; user-select: none; white-space: nowrap; }}
   th.sortable:hover {{ color: #0969da; }}
   th.sortable::after {{ content: "\\2195"; color: #afb8c1; margin-left: 4px; }}
-  th.sortable.asc::after {{ content: "\\25B2"; color: inherit; font-size: 10px; }}
-  th.sortable.desc::after {{ content: "\\25BC"; color: inherit; font-size: 10px; }}
+  th.sort-asc::after {{ content: "\\25B2"; color: inherit; font-size: 10px; }}
+  th.sort-desc::after {{ content: "\\25BC"; color: inherit; font-size: 10px; }}
   td.pr {{ max-width: 520px; }}
   .branch {{ font-family: ui-monospace, Menlo, monospace; font-size: 12px;
              color: #59636e; word-break: break-all; }}
+  .size {{ font-size: 12px; color: #59636e; }}
+  /* As narrow as its longest line; the spare width goes to other columns. */
+  td.effort {{ white-space: nowrap; width: 1%; }}
+  .score {{ font-weight: 600; }}
   .problem {{ color: #cf222e; font-weight: 600; }}
   .reviewer {{ white-space: nowrap; }}
   .nowrap {{ white-space: nowrap; }}
@@ -179,6 +188,7 @@ PAGE = """<!DOCTYPE html>
 <table>
 <thead><tr>
 <th class="sortable" title="Sort by repository and PR number">PR</th>
+<th class="sortable" title="Sort by the estimated work to review the PR, from 1 (easiest) to 5; a guess made from the changed files, not the diff">Effort</th>
 <th class="sortable" title="Sort by milestone">Milestone</th>
 <th class="sortable" title="Sort by author">Author</th>
 <th class="sortable"
@@ -196,10 +206,11 @@ PAGE = """<!DOCTYPE html>
     .forEach(el => el.addEventListener("change", () => el.form.submit()));
   // Clicking a column header sorts the rows by each cell's data-sort value;
   // clicking it again reverses the order. The choice is kept in localStorage
-  // so it survives the reload a filter change causes.
+  // so it survives the reload a filter change causes. (The key's number
+  // changes when the columns do, since the saved choice is a column index.)
   const tbody = document.getElementById("rows");
   const headers = [...document.querySelectorAll("th.sortable")];
-  const SORT_KEY = "pr-digest-sort";
+  const SORT_KEY = "pr-digest-sort-2";
   const sortRows = (col, dir) => {{
     const rows = [...tbody.rows].filter(r => r.cells.length === headers.length);
     const sign = dir === "desc" ? -1 : 1;
@@ -207,12 +218,12 @@ PAGE = """<!DOCTYPE html>
       b.cells[col].dataset.sort, undefined, {{numeric: true, sensitivity: "base"}}));
     rows.forEach(r => tbody.appendChild(r));
     headers.forEach((h, i) => {{
-      h.classList.toggle("asc", i === col && dir === "asc");
-      h.classList.toggle("desc", i === col && dir === "desc");
+      h.classList.toggle("sort-asc", i === col && dir === "asc");
+      h.classList.toggle("sort-desc", i === col && dir === "desc");
     }});
   }};
   headers.forEach((h, col) => h.addEventListener("click", () => {{
-    const dir = h.classList.contains("asc") ? "desc" : "asc";
+    const dir = h.classList.contains("sort-asc") ? "desc" : "asc";
     sortRows(col, dir);
     try {{ localStorage.setItem(SORT_KEY, col + ":" + dir); }} catch (e) {{}}
   }}));
@@ -346,6 +357,11 @@ def pr_cell(row):
             for k in row["jira"]
         )
         parts.append(f"<div>{links}</div>")
+    if row["size"]:
+        parts.append(
+            '<div class="size" title="Files changed, and total lines changed'
+            f' (added plus deleted)">{escape(row["size"])}</div>'
+        )
     return "".join(parts)
 
 
@@ -435,12 +451,38 @@ def pending_reviews(row):
     return f"{pending}.{len(row['reviewers'])}"
 
 
+def effort_cell(row):
+    """Return the Effort column's cell: the score and, a line each to keep
+    the column narrow, what it was made from. It sorts by the effective lines behind the score, so PRs with the same
+    score are ordered too; a PR without an estimate sorts last."""
+    effort = row["effort"]
+    if not effort:
+        return '<td class="effort" data-sort="99999999">-</td>'
+    why = "".join(
+        f'<div class="size">{escape(part)}</div>'
+        for part in effort["parts"]
+    )
+    # The number the column sorts by, so the order within a score shows;
+    # left out when there is nothing new to read.
+    weighted = (
+        ' <span class="size" title="What the score is made from and the'
+        " column sorts by: code lines in full, test lines at 30%, docs and"
+        ' build lines at 10%, with the adjustments listed below">'
+        f'{effort["lines"]} weighted lines</span>'
+    ) if effort["lines"] else ""
+    return (
+        f'<td class="effort" data-sort="{effort["lines"]:08d}">'
+        f'<span class="score">{effort["score"]}</span>{weighted}{why}</td>'
+    )
+
+
 def table_rows(rows):
     if not rows:
-        return '<tr><td colspan="5">No PRs match these filters.</td></tr>'
+        return '<tr><td colspan="6">No PRs match these filters.</td></tr>'
     return "\n".join(
         "<tr>"
         f'<td class="pr" data-sort="{escape(r["pr_label"])}">{pr_cell(r)}</td>'
+        f"{effort_cell(r)}"
         f'<td class="nowrap" data-sort="{escape(r["milestone"])}">'
         f'{escape(r["milestone"] or "-")}</td>'
         f'<td data-sort="{escape(r["author"])}">{escape(r["author"])}</td>'

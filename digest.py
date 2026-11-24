@@ -35,6 +35,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+import review_effort
+
 def env_list(name):
     """The comma-separated environment variable NAME as a list of strings."""
     return [s.strip() for s in os.environ.get(name, "").split(",") if s.strip()]
@@ -124,6 +126,12 @@ query($ids: [ID!]!) {
       headRefOid
       headRefName
       mergeable
+      changedFiles
+      additions
+      deletions
+      files(first: 100) {
+        nodes { path additions deletions changeType }
+      }
       commits(last: 1) {
         nodes { commit { statusCheckRollup { state } } }
       }
@@ -369,6 +377,19 @@ def jira_tickets(pr):
     return list(dict.fromkeys(keys))
 
 
+def pr_size(pr):
+    """Return the PR's size and review effort as "12 files, 345 TLC, effort
+    3/5" (TLC is the total lines changed: added plus deleted; the effort
+    runs from 1, easiest to review, to 5, see review_effort.py)."""
+    files = pr.get("changedFiles")
+    if files is None:
+        return ""
+    lines = pr.get("additions", 0) + pr.get("deletions", 0)
+    size = f"{files} file{'' if files == 1 else 's'}, {lines} TLC"
+    effort = review_effort.label(review_effort.estimate(pr))
+    return f"{size}, {effort}" if effort else size
+
+
 def build_row(pr, reviewers):
     """Return the table row as plain values; Slack cells are built from it."""
     title = TITLE_PREFIX.sub("", pr["title"]) + (" [draft]" if pr["isDraft"] else "")
@@ -393,6 +414,7 @@ def build_row(pr, reviewers):
         "latest": fmt_date(pr["updatedAt"]),
         "jira": jira_tickets(pr),
         "problems": pr_problems(pr),
+        "size": pr_size(pr),
     }
 
 
@@ -427,6 +449,10 @@ def slack_row(row):
             {"type": "text", "text": "\n"},
             {"type": "link", "text": key, "url": JIRA_BROWSE + key},
         ]
+    if row["size"]:
+        pr["elements"][0]["elements"].append(
+            {"type": "text", "text": "\n" + row["size"]}
+        )
     revs = []
     for i, (status, label) in enumerate(row["reviewers"]):
         if i:
@@ -456,6 +482,7 @@ def row_chars(row):
         + sum(len(label) + 3 for _, label in row["reviewers"])
         + len(row["latest"])
         + sum(len(JIRA_BROWSE) + (2 * len(key)) + 1 for key in row["jira"])
+        + len(row["size"]) + 1
     )
 
 
@@ -532,6 +559,8 @@ def text_table_rows(row):
     pr.append(clip(row["title"], PR_LINE_WIDTH))
     if row["jira"]:
         pr.append(clip(" ".join(row["jira"]), PR_LINE_WIDTH))
+    if row["size"]:
+        pr.append(row["size"])
     revs = [f"{STATUS_EMOJI[s][1]} {label}" for s, label in row["reviewers"]]
     revs = revs or ["no reviewers"]
     if len(row["branch"]) > PR_LINE_WIDTH and len(revs) > 1:
@@ -605,6 +634,8 @@ def markdown_report(title, rows):
         pr = (f"[{row['pr_label']}]({row['url']}){problems_emoji(row)} "
               f"`{md_escape(row['branch'])}` "
               f"{md_escape(row['title'])}")
+        if row["size"]:
+            pr += f" ({row['size']})"
         jira = ", ".join(f"[{k}]({JIRA_BROWSE}{k})" for k in row["jira"]) or "-"
         revs = ", ".join(
             f"{STATUS_EMOJI[s][1]} {md_escape(label)}" for s, label in row["reviewers"]

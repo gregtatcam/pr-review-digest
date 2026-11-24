@@ -20,13 +20,14 @@ Files
   my_digest.sh        wrapper that sets GH_TOKEN and runs my_digest.py
   my_digest_web.py    local web server around my_digest.py
   my_digest_web.sh    wrapper that sets GH_TOKEN and runs my_digest_web.py
+  review_effort.py    the review effort estimate, used by all three scripts
   digest.py           the team digest posted to Slack by the workflow
   team.txt.example    template for the team list digest.py uses
   .github/workflows/digest.yml
                       the workflow that runs digest.py daily
 
-Keep the my_digest files in one directory; the web server imports
-my_digest.py from its own directory.
+Keep the files in one directory; the web server imports my_digest.py from
+its own directory, and every script imports review_effort.py from there.
 
 Requirements
 ------------
@@ -63,6 +64,13 @@ shown with the PR. JIRA_PROJECTS lists the project keys whose ticket keys
 shown. When a PR has no ticket link and no key in its title or branch, the
 keys named in its description are shown instead. Without the Jira settings
 no tickets are shown.
+
+Optional, for the review effort estimate (see "Review effort" below):
+
+  export REVIEW_HARD_PATHS='src/core,ledger,Number'
+
+Code files whose path contains one of these, ignoring case, count 1.5
+times as much, for the parts of the code base that are slow to review.
 
 Optional, for the web page's ticket summary popup (the "i" icon next to a
 ticket), which reads the ticket from Jira:
@@ -117,20 +125,28 @@ Options:
                       to paste into a Slack canvas.
   --force             Fetch from GitHub even if the cached data is under
                       4 hours old (see "Caching" below).
+  --by-effort         List the PRs that are easiest to review first (see
+                      "Review effort" below).
 
 Examples:
 
   ./my_digest.sh                              my PRs and the PRs I review
   ./my_digest.sh --author                     only PRs I wrote
   ./my_digest.sh --reviewer --not-approved    PRs waiting for my review
-  ./my_digest.sh --reviewer alice,bob         PRs alice or bob are reviewing
+  ./my_digest.sh --reviewer --not-approved --by-effort
+                                              the same, easiest first
+  ./my_digest.sh --reviewer alice,bob        PRs alice or bob are reviewing
   ./my_digest.sh --milestone 3.0.0 --date 9-1-26
   ./my_digest.sh --user alice --markdown      alice's PRs, as Markdown
 
 Reading the table:
 
   Column "PR" shows the repo and number, the branch, any problems (conflict,
-  CI failed), the title, and linked Jira tickets. In iTerm2, Ghostty, WezTerm,
+  CI failed), the title, linked Jira tickets, and then the PR's size and
+  review effort: the number of files changed, the TLC (total lines changed,
+  added plus deleted), and the effort from 1 to 5, e.g. "12 files, 345 TLC,
+  effort 3/5". The line below says what the effort was made from, e.g.
+  "180 code lines in 2 files, 165 test lines". In iTerm2, Ghostty, WezTerm,
   kitty, and the VS Code terminal, the PR number is a clickable link; in other
   terminals the URL is printed on its own line.
 
@@ -158,8 +174,10 @@ typing in a text field press "Apply". "Force refresh" fetches new data from
 GitHub regardless of the cache.
 
 Clicking a column header sorts the table by that column; clicking it again
-reverses the order. "PR" sorts by repository and number, "Reviewers" by how
-many reviewers haven't approved yet, and "Latest activity" by date. The
+reverses the order. "PR" sorts by repository and number, "Effort" by the
+estimated review effort (easiest first, and PRs with the same score in
+order too), "Reviewers" by how many reviewers haven't approved yet, and
+"Latest activity" by date. The
 chosen sort is remembered in the browser, so it stays when a filter reloads
 the page.
 
@@ -167,6 +185,40 @@ Clicking the PR number (e.g. "widgets#123") opens the PR on GitHub in a
 new tab. The icon after the branch name copies the branch name to the
 clipboard. The "i" icon after the title pops up the PR's description;
 click it again, click elsewhere, or press Escape to close it.
+
+Review effort
+-------------
+
+Each PR gets an effort score from 1 (easiest to review) to 5 (hardest). It
+is a guess made from the list of changed files, without reading the diff:
+
+  - Lines of code count in full, test lines at 30%, and lines of docs,
+    build, and CI files at 10%.
+  - A deleted line counts half of an added one. Renamed and moved files
+    count only for the lines that changed in them.
+  - The same lines spread over more code files score higher.
+  - Code under one of the REVIEW_HARD_PATHS counts 1.5 times.
+  - Many code files with a few lines changed in each, as many added as
+    deleted, look like a mechanical change (a rename, say) and count 40%.
+  - A PR with next to no description counts 15% more.
+  - GitHub lists the first 100 files of a PR; a bigger PR is scaled up
+    from those.
+
+In my_digest and on the web page the score is for you ("Me"): a PR you
+reviewed that was updated since counts half ("updated since review"), one
+with no commits since your latest review scores 1 ("reviewed, no changes"),
+and so does one whose current commit you approved. The team digest shows the PR's own score.
+
+The total of all this is the PR's "weighted lines": up to 60 scores 1, up
+to 200 scores 2, up to 500 scores 3, up to 1200 scores 4, and more scores
+5. The web page shows the number next to the score and sorts the Effort
+column by it, so PRs with the same score are in order too; --by-effort
+sorts by it as well.
+
+The score can't tell a refactoring that moves code around from one that
+changes what the code does, so read it as "how much is there to read", not
+"how risky is it". The weights and the thresholds are at the top of
+review_effort.py.
 
 Caching
 -------
