@@ -276,7 +276,12 @@ brings it to the front. The tab goes to the clone,
 runs "gh pr checkout 123", and then runs claude with the prompt "Review PR
 #123 of octo-org/widgets, branch ...", which also asks it to resume from a
 review document for the PR if you have one (where those are kept is up to
-your Claude Code instructions). The checkout fetches the PR's
+your Claude Code instructions). The list of clones has a text field above
+it, "Extra instructions (optional)": what you type there is added to that
+prompt after "Additional instructions:", for a review or a resume that
+should look at something in particular. Pick a clone as usual, or press
+Enter in the field to start in the first clone listed. "Review next" adds
+nothing. The checkout fetches the PR's
 branch, switches to it, and fast-forwards it to the latest commit; it works
 for a PR from a fork too. If it fails (for example uncommitted changes that
 block the checkout) the window stops there with the message and claude

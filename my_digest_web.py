@@ -183,6 +183,9 @@ PAGE = """<!DOCTYPE html>
                   background: none; padding: 4px 10px; font: inherit;
                   cursor: pointer; }}
   .menu button:hover {{ background: #f6f8fa; }}
+  /* The optional instructions for the review, above the clones. */
+  .menu input[type=text] {{ display: block; box-sizing: border-box; width: 340px;
+                            margin: 2px 6px 4px; font: inherit; }}
   .copy svg {{ display: block; }}
   .info {{ display: inline-block; width: 15px; height: 15px; border-radius: 50%;
            border: 1px solid currentColor; font: italic bold 11px Georgia, serif;
@@ -382,10 +385,12 @@ PAGE = """<!DOCTYPE html>
                              {{pr: btn.dataset.pr, dir: btn.dataset.dir || ""}});
     if (error) alert(error);
   }}));
-  const startReview = async (btn, dir) => {{
+  // prompt is what was typed above the list of clones, if anything: more
+  // instructions for the review, which the server adds to its own prompt.
+  const startReview = async (btn, dir, prompt = "") => {{
     const note = btn.nextElementSibling;
     note.textContent = "Opening...";
-    const error = await post("/review", {{pr: btn.dataset.review, dir}});
+    const error = await post("/review", {{pr: btn.dataset.review, dir, prompt}});
     note.textContent = error ? "" : "Opened in " + dir;
     if (error) alert(error); else takeClone(dir);
     setTimeout(() => {{ note.textContent = ""; }}, 2500);
@@ -403,11 +408,26 @@ PAGE = """<!DOCTYPE html>
     head.className = "size";
     head.textContent = "Review in";
     menu.append(head);
-    btn.dataset.dirs.split("/").forEach(dir => {{
+    // Optional: more instructions for the review. Enter starts it in the
+    // first clone listed; a click on a clone starts it there.
+    const dirs = btn.dataset.dirs.split("/");
+    const extra = document.createElement("input");
+    extra.type = "text";
+    extra.placeholder = "Extra instructions (optional)";
+    extra.title = "Added to the prompt the review starts with. Pick a clone,"
+      + " or press Enter for the first one";
+    extra.addEventListener("click", e => e.stopPropagation());  // keep the list open
+    extra.addEventListener("keydown", e => {{
+      if (e.key !== "Enter") return;
+      closeMenus();
+      startReview(btn, dirs[0], extra.value);
+    }});
+    menu.append(extra);
+    dirs.forEach(dir => {{
       const item = document.createElement("button");
       item.type = "button";
       item.textContent = dir;
-      item.addEventListener("click", () => startReview(btn, dir));
+      item.addEventListener("click", () => startReview(btn, dir, extra.value));
       menu.append(item);
     }});
     btn.parentNode.append(menu);
@@ -1013,8 +1033,26 @@ def watch(token):
 
 def start_review(data, form):
     """Start a review of the PR the form names in an idle Terminal tab, or
-    a new Terminal window when there is none."""
-    open_terminal(review_command(data, first(form, "pr"), first(form, "dir")))
+    a new Terminal window when there is none, with the instructions typed
+    on the page, if any, added to the prompt."""
+    open_terminal(review_command(data, first(form, "pr"), first(form, "dir"),
+                                 first(form, "prompt")))
+
+
+# The longest instructions "review" takes from the page, in characters.
+EXTRA_PROMPT_MAX = 4000
+
+
+def extra_instructions(text):
+    """Return the instructions typed on the page for a review as one line
+    of printable text, to add to the prompt: the command is typed into a
+    terminal, where a line break or a control character would do something
+    else. Raises RuntimeError when they are too long."""
+    text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+    if len(text) > EXTRA_PROMPT_MAX:
+        raise RuntimeError(f"The instructions are {len(text)} characters long;"
+                           f" at most {EXTRA_PROMPT_MAX} fit.")
+    return text
 
 
 def focus_session(data, form):
@@ -1092,11 +1130,12 @@ def focus_terminal(pids):
                            " running in an editor or another terminal program.")
 
 
-def review_command(data, label, name):
+def review_command(data, label, name, extra=""):
     """Return the shell command that "review" runs for the PR with this
     label ("repo#number") in the clone with this directory name: go to the
     clone, check out the PR's branch at its latest commit, and start Claude
-    Code on a review. The directory must be one of the repository's clones,
+    Code on a review. extra is more instructions for the review, typed on
+    the page; they follow the prompt. The directory must be one of the repository's clones,
     so the request can't name any other. Raises RuntimeError when the PR or
     the clone isn't found, or when Claude Code is running in the clone (the
     page lists only the free clones, but may be out of date)."""
@@ -1115,6 +1154,9 @@ def review_command(data, label, name):
         " If a review document for this PR already exists, resume the review"
         " from it instead of starting over."
     )
+    extra = extra_instructions(extra)
+    if extra:
+        prompt += f" Additional instructions: {extra}"
     # gh rather than "git pull" and "git checkout <branch>": it does both,
     # and also gets the branch of a PR from a fork, which isn't in origin
     # (where a branch of the same name, say develop, may be something else).
