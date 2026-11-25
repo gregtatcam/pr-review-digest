@@ -43,6 +43,8 @@ FILE_OVERHEAD = 5        # effective lines for each code file touched
 MECHANICAL_WEIGHT = 0.4
 THIN_DESCRIPTION = 1.15
 REREVIEW = 0.5
+# The note on such a PR; the web page shows it in bold.
+UPDATED = "updated since review"
 
 # A mechanical change: at least this many code files, a median of at most
 # this many changed lines per file, and added and deleted lines that differ
@@ -186,7 +188,7 @@ def estimate(pr, my_status=None):
     elif my_status == "updated":
         # First, so that it shows where the explanation is cut short.
         lines *= REREVIEW
-        why.insert(0, "updated since review")
+        why.insert(0, UPDATED)
 
     score = 1 + sum(lines > level for level in LEVELS)
     return {

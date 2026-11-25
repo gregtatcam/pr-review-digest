@@ -21,6 +21,8 @@ Files
   my_digest_web.py    local web server around my_digest.py
   my_digest_web.sh    wrapper that sets GH_TOKEN and runs my_digest_web.py
   review_effort.py    the review effort estimate, used by all three scripts
+  pr_summary.py       the PR summaries the web page shows
+  ticket_summary.py   the ticket summaries the web page shows
   digest.py           the team digest posted to Slack by the workflow
   team.txt.example    template for the team list digest.py uses
   .github/workflows/digest.yml
@@ -71,6 +73,16 @@ Optional, for the review effort estimate (see "Review effort" below):
 
 Code files whose path contains one of these, ignoring case, count 1.5
 times as much, for the parts of the code base that are slow to review.
+
+Optional, for the web page's "review" link (see "Running the web page"):
+
+  export REVIEW_REPOS_DIR="$HOME/src"
+
+The directory that holds your clones of the GH_REPOS repositories. A clone
+of octo-org/widgets is any directory there whose name starts with "widgets"
+(widgets, widgets-dev) and whose origin remote is octo-org/widgets; a clone
+of your fork of it doesn't count. The default is the directory this project
+is in.
 
 Optional, for the web page's ticket summary popup (the "i" icon next to a
 ticket), which reads the ticket from Jira:
@@ -183,8 +195,40 @@ the page.
 
 Clicking the PR number (e.g. "widgets#123") opens the PR on GitHub in a
 new tab. The icon after the branch name copies the branch name to the
-clipboard. The "i" icon after the title pops up the PR's description;
-click it again, click elsewhere, or press Escape to close it.
+clipboard. The "i" icon after the title pops up a summary of the PR and,
+under it, the PR's description; click it again, click elsewhere, or press
+Escape to close it.
+
+The summary says in simple language what the PR does and how, going by the
+code changes more than by the description. It is written by the claude
+command (Claude Code, https://claude.com/claude-code), which must be
+installed and logged in; the PR's title, description, list of changed
+files, and diff (fetched from GitHub then, the first 150,000 characters of
+it) are sent to Claude for this. A summary is written the first time a PR's
+popup opens, which can take half a minute, and saved in
+~/.cache/pr-review-digest/summaries.json; it is written again once the PR
+has new commits. Without the claude command the popup says so and shows the
+description as before.
+
+"review" after the PR number starts a review of the PR with Claude Code.
+It lists your clones of the PR's repository (see REVIEW_REPOS_DIR above)
+that are free, that is, have no Claude Code session running in them or in
+a directory inside them, so that the checkout doesn't switch the branch
+under a running session. When no clone is free the link is greyed out;
+hover over it for the reason. The list is made when the page loads, so
+reload the page after closing a session; a clone that was taken since is
+refused with a message.
+
+Picking a clone opens a new Terminal window (macOS only) that goes to it,
+runs "gh pr checkout 123", and then runs claude with the prompt "Review PR
+#123 of octo-org/widgets, branch ...", which also asks it to resume from a
+review document for the PR if you have one (where those are kept is up to
+your Claude Code instructions). The checkout fetches the PR's
+branch, switches to it, and fast-forwards it to the latest commit; it works
+for a PR from a fork too. If it fails (for example uncommitted changes that
+block the checkout) the window stops there with the message and claude
+isn't started. The first time, macOS may ask to let the server control
+Terminal.
 
 Review effort
 -------------
