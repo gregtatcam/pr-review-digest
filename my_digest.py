@@ -464,10 +464,13 @@ def build_row(pr, reviewers, me=None):
     title = TITLE_PREFIX.sub("", pr["title"]) + (" [draft]" if pr["isDraft"] else "")
     revs = []
     my_status = None
+    mine = None  # my entry among the reviewers, when I'm one
     for login in sorted(reviewers, key=str.lower):
         info = reviewers[login]
         when = fmt_date(info["last"])
         status = reviewer_status(info, pr["headRefOid"])
+        if login.lower() == me:
+            mine = info
         if login.lower() == me and status != "none":
             if status == "approved":
                 my_status = "approved"
@@ -496,7 +499,30 @@ def build_row(pr, reviewers, me=None):
         "jira": jira_tickets(pr),
         "problems": pr_problems(pr),
         "size": size,
+        # For the web page. Where my review stands: "todo" (asked, not
+        # reviewed yet), "updated" (the PR has commits since my review),
+        # "unchanged", "approved", or "" when I'm not a reviewer.
+        "mine": (my_status or "todo") if mine else "",
+        # The commit I last reviewed, when the PR has commits since.
+        "reviewed_oid": (mine.get("last_oid") or "") if my_status == "updated" else "",
+        "replies": replies_since(pr, me, mine["last"]) if mine else 0,
     }
+
+
+def replies_since(pr, me, when):
+    """Return how many times other people commented in review on the PR
+    after the time of my latest review: replies in review threads and new
+    reviews (each is a review to GitHub), not counting bots. 0 when I
+    haven't reviewed."""
+    if not when:
+        return 0
+    return sum(
+        1 for review in pr["reviews"]
+        if review["author"] and review["author"]["__typename"] != "Bot"
+        and review["author"]["login"].lower() != me
+        and review["state"] != "PENDING"
+        and (review["submittedAt"] or "") > when
+    )
 
 
 def text_cell(text):

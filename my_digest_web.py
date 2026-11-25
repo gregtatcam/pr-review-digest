@@ -57,7 +57,36 @@ REPOS_DIR = Path(
     os.environ.get("REVIEW_REPOS_DIR") or Path(__file__).resolve().parent.parent
 ).expanduser()
 
-# Given to the page and required back by /review; see do_POST.
+# Where the review documents are kept, in this directory or any below it: a
+# PR's is a Markdown file with "PR<number>" in its name (PR123-review.md).
+DOCS_DIR = Path(
+    os.environ.get("REVIEW_DOCS_DIR")
+    or Path(__file__).resolve().parent.parent / "Documents"
+).expanduser()
+PR_DOCUMENT = re.compile(r"(?<![A-Za-z0-9])PR(\d+)(?!\d)")
+COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+
+def env_number(name):
+    """The environment variable as a whole number; 0 when unset or odd."""
+    try:
+        return max(0, int(os.environ.get(name, "0")))
+    except ValueError:
+        return 0
+
+
+# Both are off unless set, so that the server does nothing on its own.
+# How many summaries a day may be written before they are asked for; each
+# one costs Claude usage. See write_ahead().
+WRITE_AHEAD = env_number("PR_SUMMARY_AHEAD")
+AHEAD_LOCK = threading.Lock()
+# How often, in minutes, to fetch the PRs and notify me of changes to my
+# reviews; at least 15. See watch().
+NOTIFY_MINUTES = env_number("PR_NOTIFY_MINUTES") and max(15, env_number("PR_NOTIFY_MINUTES"))
+NOTIFY_MAX = 5  # notifications shown one each; the rest are counted
+
+# Given to the page and required back by its buttons; see do_POST.
 TOKEN = secrets.token_urlsafe()
 
 STATUS_TEXT = {
@@ -137,6 +166,12 @@ PAGE = """<!DOCTYPE html>
              cursor: pointer; color: #0969da; font: inherit; }}
   .review:hover {{ text-decoration: underline; }}
   .review:disabled {{ color: #afb8c1; cursor: default; text-decoration: none; }}
+  /* Other small buttons that look like links: open the review document,
+     go to the session on the PR. */
+  .act {{ border: none; background: none; padding: 0; cursor: pointer;
+          color: #0969da; font: inherit; }}
+  .act:hover {{ text-decoration: underline; }}
+  .session {{ margin-left: 8px; font-weight: 600; color: #1a7f37; }}
   /* The list of clones to review in, under the "review" button. */
   .pick {{ position: relative; }}
   .menu {{ position: absolute; left: 8px; top: 100%; z-index: 10;
@@ -219,6 +254,9 @@ PAGE = """<!DOCTYPE html>
             title="Fetch the latest PR data from GitHub, then apply the filters">
       Fetch from GitHub</button>
     <a href="/" title="Clear every filter">Clear filters</a>
+    <button type="button" id="next"
+            title="Start a review of the first PR in the table, as it is sorted, that is waiting for your review, in the first free clone">
+      Review next</button>
   </div>
 </form>
 <datalist id="logins">{logins}</datalist>
@@ -297,18 +335,29 @@ PAGE = """<!DOCTYPE html>
       btn.title = "Claude Code is running in every clone of the repository";
     }}
   }});
+  // Ask the server to do something on this computer; the answer is the
+  // error message, empty when it worked.
+  const post = async (path, fields) => {{
+    try {{
+      const resp = await fetch(path, {{method: "POST",
+        body: new URLSearchParams({{...fields, token: "{token}"}})}});
+      return resp.ok ? (await resp.json()).error || ""
+                     : "The server refused; reload the page and try again.";
+    }} catch (err) {{
+      return err.message;
+    }}
+  }};
+  // The small action buttons: open the review document, or bring the
+  // Terminal window of the session on the PR to the front.
+  document.querySelectorAll(".act").forEach(btn => btn.addEventListener("click", async () => {{
+    const error = await post("/" + btn.dataset.act,
+                             {{pr: btn.dataset.pr, dir: btn.dataset.dir || ""}});
+    if (error) alert(error);
+  }}));
   const startReview = async (btn, dir) => {{
     const note = btn.nextElementSibling;
     note.textContent = "Opening...";
-    let error = "";
-    try {{
-      const resp = await fetch("/review", {{method: "POST",
-        body: new URLSearchParams({{pr: btn.dataset.review, dir, token: "{token}"}})}});
-      error = resp.ok ? (await resp.json()).error
-                      : "The server refused; reload the page and try again.";
-    }} catch (err) {{
-      error = err.message;
-    }}
+    const error = await post("/review", {{pr: btn.dataset.review, dir}});
     note.textContent = error ? "" : "Opened in " + dir;
     if (error) alert(error); else takeClone(dir);
     setTimeout(() => {{ note.textContent = ""; }}, 2500);
@@ -333,6 +382,21 @@ PAGE = """<!DOCTYPE html>
     }});
     btn.parentNode.append(menu);
   }}));
+  // "Review next" starts a review of the first PR in the table, in the
+  // order it is sorted in, that waits for my review (not reviewed yet, or
+  // changed since) and has no session on it, in the first free clone.
+  document.getElementById("next").addEventListener("click", () => {{
+    const btn = [...tbody.querySelectorAll(".review")].find(b =>
+      !b.disabled && ["todo", "updated"].includes(b.dataset.mine)
+      && !("running" in b.dataset));
+    if (!btn) {{
+      alert("No PR in the table is waiting for your review with a free clone"
+            + " to review it in.");
+      return;
+    }}
+    btn.scrollIntoView({{block: "center"}});
+    startReview(btn, btn.dataset.dirs.split("/")[0]);
+  }});
   document.addEventListener("click", closeMenus);
   document.addEventListener("keydown", e => {{
     if (e.key === "Escape") closeMenus();
@@ -345,13 +409,14 @@ PAGE = """<!DOCTYPE html>
     .forEach(d => d.classList.remove("open"));
   // A PR's popup starts with a summary of what the PR does, fetched from
   // the server the first time the popup opens; writing one takes a while.
-  const loadPr = async desc => {{
-    if (desc.dataset.loaded) return;
-    desc.dataset.loaded = "1";
-    const box = desc.querySelector(".summary");
+  // A PR with commits since my review also has a summary of what changed
+  // since; each box is filled on its own.
+  const loadSummary = async (box, query) => {{
+    if (!box || box.dataset.loaded) return;
+    box.dataset.loaded = "1";
     let error = "";
     try {{
-      const resp = await fetch("/pr?pr=" + encodeURIComponent(desc.dataset.pr));
+      const resp = await fetch("/pr?" + new URLSearchParams(query));
       const summary = await resp.json();
       error = summary.error;
       if (!error) {{
@@ -363,8 +428,13 @@ PAGE = """<!DOCTYPE html>
     }}
     if (error) {{
       box.textContent = "(No summary: " + error + ")";
-      delete desc.dataset.loaded;  // try again the next time it opens
+      delete box.dataset.loaded;  // try again the next time it opens
     }}
+  }};
+  const loadPr = desc => {{
+    loadSummary(desc.querySelector(".summary"), {{pr: desc.dataset.pr}});
+    loadSummary(desc.querySelector(".changes"),
+                {{pr: desc.dataset.pr, since: desc.dataset.since || ""}});
   }};
   const loadTicket = async desc => {{
     if (desc.dataset.loaded) return;
@@ -438,30 +508,72 @@ def cache_note():
     return f"Data fetched {age} min ago."
 
 
-def review_button(row, choices):
-    """Return the "review" button of a PR. It carries the names of the
-    clones a review can start in, joined by "/" (which no directory name
-    holds), and is greyed out when there are none."""
-    free, why = choices.get(row["pr_label"].split("#")[0], ([], "No clone"))
+def review_button(row, state):
+    """Return the "review" button of a PR, which reads "resume" when there
+    is a review document for the PR. It carries the names of the clones a
+    review can start in, joined by "/" (which no directory name holds), and
+    is greyed out when there are none. Next to it, when a Claude Code
+    session is on the PR's branch in a clone, a button that brings the
+    session's Terminal window to the front."""
+    label = escape(row["pr_label"])
+    free, why = state["choices"].get(row["pr_label"].split("#")[0], ([], "No clone"))
     if free:
-        state = (
+        dirs = (
             f' data-dirs="{escape("/".join(free))}" title="Pick a clone of the'
             " repository; a terminal opens there, checks out the branch, and"
             ' starts a review of the PR with Claude Code"'
         )
     else:
-        state = f' disabled title="{escape(why)}"'
+        dirs = f' disabled title="{escape(why)}"'
+    clone = state["running"].get(row["pr_label"])
+    session = (
+        f'<button type="button" class="act session" data-act="focus"'
+        f' data-pr="{label}" data-dir="{escape(clone)}" title="A Claude Code'
+        " session is on this PR's branch there; click to bring its Terminal"
+        f' window to the front">session in {escape(clone)}</button>'
+    ) if clone else ""
+    resume = review_document(row, state) is not None
     return (
         '<span class="pick"><button type="button" class="review"'
-        f' data-review="{escape(row["pr_label"])}"{state}>review</button>'
-        '<span class="copied"></span></span>'
+        f' data-review="{label}" data-mine="{row["mine"]}"'
+        f'{" data-running" if clone else ""}{dirs}>'
+        f'{"resume" if resume else "review"}</button>'
+        f'<span class="copied"></span></span>{session}'
     )
 
 
-def pr_cell(row, choices):
+def review_document(row, state):
+    """Return the review document of the row's PR, or None."""
+    return state["documents"].get(int(row["pr_label"].split("#")[1]))
+
+
+def review_notes(row, state):
+    """Return the line under a PR that says where my review stands: a link
+    that opens the review document, and how many replies there were since
+    my review. "" when there is neither."""
+    notes = []
+    document = review_document(row, state)
+    if document:
+        when = time.strftime("%m-%d", time.localtime(document.stat().st_mtime))
+        notes.append(
+            '<button type="button" class="act" data-act="open"'
+            f' data-pr="{escape(row["pr_label"])}"'
+            f' title="Open {escape(document.name)}">review notes {when}</button>'
+        )
+    if row["replies"]:
+        notes.append(
+            '<span class="updated" title="Review comments and replies by'
+            f' others after your latest review">{row["replies"]}'
+            f' repl{"y" if row["replies"] == 1 else "ies"} since your'
+            " review</span>"
+        )
+    return f'<div class="size">{" &middot; ".join(notes)}</div>' if notes else ""
+
+
+def pr_cell(row, state):
     parts = [
         f'<a href="{escape(row["url"])}" target="_blank" rel="noopener">'
-        f'{escape(row["pr_label"])}</a>{review_button(row, choices)}'
+        f'{escape(row["pr_label"])}</a>{review_button(row, state)}'
     ]
     for p in row["problems"]:
         parts.append(f' <span class="problem">{digest.PROBLEM_EMOJI[p]} {p}</span>')
@@ -476,8 +588,14 @@ def pr_cell(row, choices):
     body = HTML_COMMENT.sub("", row["body"]).strip()
     # The popup keeps line breaks (white-space: pre-wrap), so the newlines
     # here show. The summary is filled in when the popup first opens.
+    # A PR with commits since my review starts with what changed since.
+    since = (
+        f' data-since="{escape(row["reviewed_oid"])}">'
+        '<strong>Changed since your review</strong>\n'
+        '<span class="changes pending">Summarizing...</span>\n\n'
+    ) if row["reviewed_oid"] else ">"
     desc = (
-        f'<div class="desc" data-pr="{escape(row["pr_label"])}">'
+        f'<div class="desc" data-pr="{escape(row["pr_label"])}"{since}'
         '<strong>Summary</strong>\n'
         '<span class="summary pending">Summarizing...</span>\n\n'
         '<strong>Description</strong>\n'
@@ -507,6 +625,7 @@ def pr_cell(row, choices):
             '<div class="size" title="Files changed, and total lines changed'
             f' (added plus deleted)">{escape(row["size"])}</div>'
         )
+    parts.append(review_notes(row, state))
     return "".join(parts)
 
 
@@ -579,10 +698,10 @@ def ticket_popup(key):
         }
 
 
-def claude_directories():
-    """Return the working directories of the running Claude Code sessions.
-    Returns none when the processes can't be listed, so a failure here
-    doesn't block a review."""
+def claude_sessions():
+    """Return the running Claude Code sessions as (process id, working
+    directory). Returns none when the processes can't be listed, so a
+    failure here doesn't block a review."""
     try:
         listing = subprocess.run(
             ["ps", "-axo", "pid=,comm="], capture_output=True, text=True,
@@ -603,7 +722,41 @@ def claude_directories():
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []
-    return [Path(line[1:]) for line in listing.splitlines() if line.startswith("n")]
+    sessions = []
+    for line in listing.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n"):
+            sessions.append((pid, Path(line[1:])))
+    return sessions
+
+
+def inside(directory, cwd):
+    """True when cwd is the directory or a directory inside it."""
+    root = directory.resolve()
+    return cwd == root or root in cwd.parents
+
+
+def review_documents():
+    """Return {PR number: its review document}: the Markdown files under
+    DOCS_DIR with "PR<number>" in their names, the newest when a PR has
+    several. The name doesn't say which repository the PR is in, so PRs
+    with the same number in two repositories share a document."""
+    found = {}
+    for root, dirs, files in os.walk(DOCS_DIR):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "cache"]
+        for name in files:
+            if not name.endswith(".md"):
+                continue
+            path = Path(root, name)
+            for number in PR_DOCUMENT.findall(name):
+                try:
+                    older = found.get(int(number))
+                    if not older or older.stat().st_mtime < path.stat().st_mtime:
+                        found[int(number)] = path
+                except OSError:
+                    pass
+    return found
 
 
 def clones(repo):
@@ -635,35 +788,58 @@ def clones(repo):
     return found
 
 
-def free_clones(repo, busy):
-    """Return the clones of a repository that no Claude Code session is
-    running in; busy holds the sessions' working directories. A session in a
-    directory inside a clone counts as running in the clone."""
-    free = []
-    for directory in clones(repo):
-        root = directory.resolve()
-        if not any(cwd == root or root in cwd.parents for cwd in busy):
-            free.append(directory)
-    return free
+def free_clones(directories, sessions):
+    """Return those of a repository's clones that no Claude Code session is
+    running in. A session in a directory inside a clone counts as running
+    in the clone."""
+    return [
+        d for d in directories
+        if not any(inside(d, cwd) for _, cwd in sessions)
+    ]
 
 
-def review_choices(data):
-    """Return, for each repository name in the PR data, what the "review"
-    button of its PRs offers: (names of the clones free for a review, why
-    there are none). Worked out once per page, not per PR."""
-    busy = claude_directories()
-    choices = {}
-    for repo in data["prs"]:
-        free = [d.name for d in free_clones(repo, busy)]
+def current_branch(directory):
+    """Return the branch checked out in a clone, or "" when it can't be
+    told."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def page_state(data):
+    """Return what the PR cells show besides the PR data, worked out once
+    per page, not per PR:
+      "choices"    for each repository name, what the "review" button of
+                   its PRs offers: (names of the clones free for a review,
+                   why there are none)
+      "running"    {PR label: clone name} for the PRs whose branch is
+                   checked out in a clone that a Claude Code session is in
+      "documents"  {PR number: review document}"""
+    sessions = claude_sessions()
+    choices, running = {}, {}
+    for repo, prs in data["prs"].items():
+        directories = clones(repo)
+        free = free_clones(directories, sessions)
         if free:
             why = ""
-        elif clones(repo):
+        elif directories:
             why = ("Claude Code is running in every clone of the repository"
-                   f" ({', '.join(d.name for d in clones(repo))})")
+                   f" ({', '.join(d.name for d in directories)})")
         else:
             why = f"No clone of {repo} in {REPOS_DIR}; see README.txt"
-        choices[repo.split("/")[1]] = (free, why)
-    return choices
+        choices[repo.split("/")[1]] = ([d.name for d in free], why)
+        for directory in directories:
+            if directory in free:
+                continue
+            branch = current_branch(directory)
+            for pr in prs:
+                if pr["headRefName"] == branch:
+                    running.setdefault(f"{pr['repo']}#{pr['number']}", directory.name)
+    return {"choices": choices, "running": running, "documents": review_documents()}
 
 
 def find_pr(data, label):
@@ -677,15 +853,191 @@ def find_pr(data, label):
     raise RuntimeError(f"{label} isn't among the loaded PRs; reload the page.")
 
 
-def pr_popup(data, label, token):
+def pr_popup(data, label, token, since=""):
     """Return what the PR popup shows above the description, as {"text"}:
-    the PR's summary, saved or written now. Returns {"error"} when there is
-    none to give."""
+    the PR's summary, or with since (the commit I last reviewed) the
+    summary of what changed after it; saved or written now. Returns
+    {"error"} when there is none to give."""
     try:
         repo, pr = find_pr(data, label)
-        return pr_summary.summary(repo, pr, token)
+        if not since:
+            return pr_summary.summary(repo, pr, token)
+        if not COMMIT.fullmatch(since):
+            raise RuntimeError("not a commit id")
+        return pr_summary.changes(repo, pr, since, token)
     except RuntimeError as e:
         return {"error": str(e)}
+
+
+def write_ahead(data, token):
+    """Write the summaries of the PRs that wait for my review before they
+    are asked for, so that their popups open at once: what changed since my
+    review for a PR I reviewed, the PR's summary for one I haven't. At most
+    WRITE_AHEAD new ones a day, since each costs Claude usage. Runs in its
+    own thread, one at a time."""
+    if not AHEAD_LOCK.acquire(blocking=False):
+        return
+    try:
+        _, rows = digest.select_rows(data, filter_args({}))
+        for row in rows:
+            if row["mine"] not in ("todo", "updated"):
+                continue
+            try:
+                repo, pr = find_pr(data, row["pr_label"])
+                if row["reviewed_oid"]:
+                    pr_summary.changes(repo, pr, row["reviewed_oid"], token, WRITE_AHEAD)
+                else:
+                    pr_summary.summary(repo, pr, token, WRITE_AHEAD)
+            except pr_summary.OverBudget:
+                return
+            except RuntimeError:
+                continue  # this one will be tried again when it's asked for
+    finally:
+        AHEAD_LOCK.release()
+
+
+def review_states(data):
+    """Return {PR label: (where my review stands, replies since my review,
+    title)} for the PRs I'm a reviewer of; see build_row() for the first
+    two."""
+    me = data["viewer"].lower()
+    states = {}
+    for prs in data["prs"].values():
+        for pr in prs:
+            row = digest.build_row(pr, digest.summarize_reviewers(pr), me)
+            if row["mine"]:
+                states[row["pr_label"]] = (row["mine"], row["replies"], row["title"])
+    return states
+
+
+def news(old, new):
+    """Return what happened to my reviews between two loads of the PR data,
+    a line each: a review asked of me, commits on a PR I had reviewed, and
+    replies after my review."""
+    before, lines = review_states(old), []
+    for label, (mine, replies, title) in review_states(new).items():
+        was, had = before.get(label, ("", 0, ""))[:2]
+        if mine == "todo" and was != "todo":
+            lines.append(f"Review requested: {label} {title}")
+        elif mine == "updated" and was != "updated":
+            lines.append(f"Updated since your review: {label} {title}")
+        elif replies > had:
+            lines.append(f"New replies: {label} {title}")
+    return lines
+
+
+def notify(lines):
+    """Show the lines as macOS notifications, the first few one each and
+    the rest as a count."""
+    script = ["on run argv",
+              'display notification (item 1 of argv) with title "PR digest"',
+              "end run"]
+    args = ["osascript"]
+    for line in script:
+        args += ["-e", line]
+    shown = lines[:NOTIFY_MAX]
+    if len(lines) > NOTIFY_MAX:
+        shown.append(f"and {len(lines) - NOTIFY_MAX} more; see the PR digest page")
+    for line in shown:
+        try:
+            subprocess.run(args + [line], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return
+
+
+def watch(token):
+    """Every NOTIFY_MINUTES, fetch the PRs from GitHub and notify me of what
+    happened to my reviews since the last fetch. Runs in its own thread for
+    as long as the server does. It asks GitHub only; no Claude usage."""
+    while True:
+        time.sleep(NOTIFY_MINUTES * 60)
+        try:
+            with Handler.lock:
+                old = Handler.data or digest.load_data(token, False)
+                Handler.data = digest.load_data(token, True)
+            notify(news(old, Handler.data))
+        except Exception as e:  # keep watching whatever one round hits
+            print(f"watch: {e}", file=sys.stderr)
+
+
+def start_review(data, form):
+    """Open a Terminal window that reviews the PR the form names."""
+    open_terminal(review_command(data, first(form, "pr"), first(form, "dir")))
+
+
+def focus_session(data, form):
+    """Bring to the front the Terminal window of a Claude Code session in
+    the clone the form names, of the repository of the PR it names. Raises
+    RuntimeError when there is no such session or window."""
+    repo, _ = find_pr(data, first(form, "pr"))
+    name = first(form, "dir")
+    directory = next((d for d in clones(repo) if d.name == name), None)
+    if not directory:
+        raise RuntimeError(f"{name!r} isn't a clone of {repo} in {REPOS_DIR}.")
+    pids = [pid for pid, cwd in claude_sessions() if inside(directory, cwd)]
+    if not pids:
+        raise RuntimeError(f"No Claude Code session is running in {directory}"
+                           " any more; reload the page.")
+    focus_terminal(pids)
+
+
+def open_document(data, form):
+    """Open the review document of the PR the form names, in the program
+    that opens Markdown files. Raises RuntimeError when there is none."""
+    _, pr = find_pr(data, first(form, "pr"))
+    document = review_documents().get(pr["number"])
+    if not document:
+        raise RuntimeError(f"No review document for PR {pr['number']} under"
+                           f" {DOCS_DIR} any more; reload the page.")
+    try:
+        subprocess.run(["open", str(document)], check=True, capture_output=True,
+                       text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"Opening {document} failed: {e}") from e
+
+
+# AppleScript: select the Terminal tab on one of the given ttys and bring
+# its window to the front; prints "found" when there is one.
+FOCUS_SCRIPT = [
+    "on run argv",
+    'tell application "Terminal"',
+    "repeat with w in windows",
+    "repeat with t in tabs of w",
+    "if (tty of t) is in argv then",
+    "set selected of t to true",
+    "set index of w to 1",
+    "activate",
+    'return "found"',
+    "end if",
+    "end repeat",
+    "end repeat",
+    "end tell",
+    'return ""',
+    "end run",
+]
+
+
+def focus_terminal(pids):
+    """Bring to the front the Terminal window that one of the processes
+    runs in. Raises RuntimeError when none of them is in a Terminal window
+    (a session can also run in an editor or another terminal program)."""
+    args = ["osascript"]
+    for line in FOCUS_SCRIPT:
+        args += ["-e", line]
+    try:
+        ttys = subprocess.run(
+            ["ps", "-o", "tty=", "-p", ",".join(map(str, pids))],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.split()
+        ttys = [f"/dev/{t}" for t in ttys if t != "??"]
+        found = ttys and subprocess.run(
+            args + ttys, check=True, capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"Asking Terminal for its windows failed: {e}") from e
+    if not found:
+        raise RuntimeError("The session isn't in a Terminal window; it may be"
+                           " running in an editor or another terminal program.")
 
 
 def review_command(data, label, name):
@@ -700,7 +1052,7 @@ def review_command(data, label, name):
     directory = next((d for d in clones(repo) if d.name == name), None)
     if not directory:
         raise RuntimeError(f"{name!r} isn't a clone of {repo} in {REPOS_DIR}.")
-    if directory not in free_clones(repo, claude_directories()):
+    if not free_clones([directory], claude_sessions()):
         raise RuntimeError(
             f"Claude Code is now running in {directory}. The review would"
             " switch the branch under it, so it wasn't started; reload the"
@@ -792,13 +1144,13 @@ def effort_cell(row):
     )
 
 
-def table_rows(rows, choices):
+def table_rows(rows, state):
     if not rows:
         return '<tr><td colspan="6">No PRs match these filters.</td></tr>'
     return "\n".join(
         "<tr>"
         f'<td class="pr" data-sort="{escape(r["pr_label"])}">'
-        f"{pr_cell(r, choices)}</td>"
+        f"{pr_cell(r, state)}</td>"
         f"{effort_cell(r)}"
         f'<td class="nowrap" data-sort="{escape(r["milestone"])}">'
         f'{escape(r["milestone"] or "-")}</td>'
@@ -862,7 +1214,7 @@ def render(query, data, error=""):
         not_approved=checked("not_approved"),
         token=TOKEN,
         logins=login_options(data),
-        rows=table_rows(rows, review_choices(data)),
+        rows=table_rows(rows, page_state(data)),
     )
 
 
@@ -870,6 +1222,7 @@ class Handler(BaseHTTPRequestHandler):
     token = None
     data = None  # the last PR data loaded
     lock = threading.Lock()  # one fetch at a time
+    ahead_for = None  # when the data that summaries were last written ahead for was fetched
 
     def do_GET(self):
         url = urlparse(self.path)
@@ -878,7 +1231,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_ticket(first(query, "key").upper())
             return
         if url.path == "/pr":
-            self.send_json(pr_popup(Handler.data, first(query, "pr"), Handler.token))
+            self.send_json(pr_popup(
+                Handler.data, first(query, "pr"), Handler.token, first(query, "since")
+            ))
             return
         if url.path != "/":
             self.send_error(404)
@@ -905,33 +1260,31 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        """Start a review in a new Terminal window. Only this server's own
+        """Do one of the things the page's buttons do on this computer:
+        start a review in a new Terminal window, bring a session's window
+        to the front, or open a review document. Only this server's own
         page may ask: the request must be addressed to this server by its
         local name and carry the token the page was given, so no other web
         page can make the server run anything."""
+        actions = {"/review": start_review, "/focus": focus_session,
+                   "/open": open_document}
         length = int(self.headers.get("Content-Length") or 0)
         form = parse_qs(self.rfile.read(length).decode(errors="replace"))
         port = self.server.server_port
+        action = actions.get(urlparse(self.path).path)
         if (
-            urlparse(self.path).path != "/review"
+            not action
             or self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}")
             or not secrets.compare_digest(first(form, "token"), TOKEN)
         ):
             self.send_error(403)
             return
         try:
-            open_terminal(review_command(
-                Handler.data or {"prs": {}}, first(form, "pr"), first(form, "dir")
-            ))
+            action(Handler.data, form)
             result = {}
         except RuntimeError as e:
             result = {"error": str(e)}
-        body = json.dumps(result).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self.send_json(result)
 
     def send_json(self, value):
         body = json.dumps(value).encode()
@@ -959,6 +1312,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with Handler.lock:
                 Handler.data = digest.load_data(Handler.token, force)
+            # Once for each fetch from GitHub, not for each page shown.
+            fetched = digest.CACHE_FILE.stat().st_mtime
+            if WRITE_AHEAD and fetched != Handler.ahead_for:
+                Handler.ahead_for = fetched
+                threading.Thread(
+                    target=write_ahead, args=(Handler.data, Handler.token),
+                    daemon=True,
+                ).start()
             return ""
         except Exception as e:  # show any fetch failure on the page
             return f"Fetching from GitHub failed: {e}"
@@ -982,6 +1343,8 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Serving {url} (Ctrl-C to stop)", file=sys.stderr)
+    if NOTIFY_MINUTES:
+        threading.Thread(target=watch, args=(Handler.token,), daemon=True).start()
     if not args.no_browser:
         webbrowser.open(url)
     try:

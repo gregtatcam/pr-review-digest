@@ -84,6 +84,27 @@ of octo-org/widgets is any directory there whose name starts with "widgets"
 of your fork of it doesn't count. The default is the directory this project
 is in.
 
+  export REVIEW_DOCS_DIR="$HOME/reviews"
+
+The directory your review documents are kept in, at any depth: a PR's is a
+Markdown file with "PR<number>" in its name (PR123-review.md). Directories
+named "cache" are skipped. The default is Documents next to this project's
+directory.
+
+Optional, both off unless set, so that the server does nothing on its own:
+
+  export PR_SUMMARY_AHEAD=5
+  export PR_NOTIFY_MINUTES=60
+
+PR_SUMMARY_AHEAD lets the server write up to that many summaries a day
+before you ask for them, for the PRs waiting for your review, so that their
+popups open at once. Each costs Claude usage, which is why there is a daily
+limit and it is off by default. PR_NOTIFY_MINUTES makes the server fetch
+the PRs from GitHub that often (at least every 15 minutes) and show a macOS
+notification when a review is asked of you, a PR you reviewed gets new
+commits, or someone replies after your review. That uses the GitHub API
+only, no Claude usage.
+
 Optional, for the web page's ticket summary popup (the "i" icon next to a
 ticket), which reads the ticket from Jira:
 
@@ -210,7 +231,35 @@ popup opens, which can take half a minute, and saved in
 has new commits. Without the claude command the popup says so and shows the
 description as before.
 
-"review" after the PR number starts a review of the PR with Claude Code.
+For a PR that has commits since your latest review, the popup starts with
+"Changed since your review": what the author changed after the commit you
+reviewed, made from the new commits' messages and their changes to the PR's
+files (changes that a merge of the base branch made to other files are left
+out). It is written and saved like the summary, for that pair of commits.
+When the new commits only brought in the base branch it says so without
+asking Claude.
+
+Under a PR, "review notes" with a date is your review document for it (see
+REVIEW_DOCS_DIR above; the newest when there are several, and the date it
+was last changed); click it to open the file. "N replies since your review"
+counts the review comments and replies other people made after your latest
+review.
+
+Claude usage: the page uses none while it is open or idle. A summary is
+written once, when you first open a popup, and then saved; nothing else on
+the page asks Claude anything, unless you set PR_SUMMARY_AHEAD. The review
+sessions you start are yours as usual.
+
+"review" after the PR number starts a review of the PR with Claude Code;
+it reads "resume" when you have a review document for the PR. When a
+Claude Code session is running in a clone that has the PR's branch checked
+out, "session in <clone>" shows next to it; click that to bring the
+session's Terminal window to the front. "Review next", by the filters,
+starts a review of the first PR in the table, in the order it is sorted
+in, that is waiting for your review (not reviewed yet, or changed since)
+in the first free clone.
+
+"review" works like this.
 It lists your clones of the PR's repository (see REVIEW_REPOS_DIR above)
 that are free, that is, have no Claude Code session running in them or in
 a directory inside them, so that the checkout doesn't switch the branch
