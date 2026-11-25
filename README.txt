@@ -268,7 +268,10 @@ hover over it for the reason. The list is made when the page loads, so
 reload the page after closing a session; a clone that was taken since is
 refused with a message.
 
-Picking a clone opens a new Terminal window (macOS only) that goes to it,
+Picking a clone takes a Terminal tab (macOS only) that is idle, that is, a
+shell at its prompt with nothing running in it (so not one with a Claude
+Code session), or opens a new Terminal window when no tab is idle, and
+brings it to the front. The tab goes to the clone,
 runs "gh pr checkout 123", and then runs claude with the prompt "Review PR
 #123 of octo-org/widgets, branch ...", which also asks it to resume from a
 review document for the PR if you have one (where those are kept is up to

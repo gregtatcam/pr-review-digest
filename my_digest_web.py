@@ -961,7 +961,8 @@ def watch(token):
 
 
 def start_review(data, form):
-    """Open a Terminal window that reviews the PR the form names."""
+    """Start a review of the PR the form names in an idle Terminal tab, or
+    a new Terminal window when there is none."""
     open_terminal(review_command(data, first(form, "pr"), first(form, "dir")))
 
 
@@ -1073,21 +1074,46 @@ def review_command(data, label, name):
     )
 
 
+# AppleScript: run the command (its one argument) in a Terminal tab and
+# bring that tab's window to the front. It takes the first tab that is idle
+# (a shell at its prompt, nothing running in it: "busy" is false), so not
+# one with a Claude Code session, an editor, or a build in it, and opens a
+# new window when there is none. Prints "reused" or "new". The command is
+# sent before the window is raised: raising renumbers the windows, and the
+# tab reference goes by window number.
+RUN_SCRIPT = [
+    "on run argv",
+    'tell application "Terminal"',
+    "repeat with w in windows",
+    "try",
+    "repeat with t in tabs of w",
+    "if not (busy of t) then",
+    "do script (item 1 of argv) in t",
+    "set selected of t to true",
+    "if miniaturized of w then set miniaturized of w to false",
+    "set index of w to 1",
+    "activate",
+    'return "reused"',
+    "end if",
+    "end repeat",
+    "end try",
+    "end repeat",
+    "activate",
+    "do script (item 1 of argv)",
+    'return "new"',
+    "end tell",
+    "end run",
+]
+
+
 def open_terminal(command):
-    """Open a new Terminal window and run the shell command in it. The
-    command is handed to AppleScript as an argument, so it needs no quoting
-    beyond the shell's own. Raises RuntimeError when the window can't be
-    opened."""
-    script = [
-        "on run argv",
-        'tell application "Terminal"',
-        "activate",
-        "do script (item 1 of argv)",
-        "end tell",
-        "end run",
-    ]
+    """Run the shell command in an idle Terminal tab, or in a new Terminal
+    window when no tab is idle, and bring it to the front; see RUN_SCRIPT.
+    The command is handed to AppleScript as an argument, so it needs no
+    quoting beyond the shell's own. Raises RuntimeError when Terminal can't
+    be asked."""
     args = ["osascript"]
-    for line in script:
+    for line in RUN_SCRIPT:
         args += ["-e", line]
     try:
         subprocess.run(args + [command], check=True, capture_output=True,
@@ -1261,7 +1287,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Do one of the things the page's buttons do on this computer:
-        start a review in a new Terminal window, bring a session's window
+        start a review in a Terminal window, bring a session's window
         to the front, or open a review document. Only this server's own
         page may ask: the request must be addressed to this server by its
         local name and carry the token the page was given, so no other web
