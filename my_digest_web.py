@@ -326,15 +326,43 @@ PAGE = """<!DOCTYPE html>
   // left with none is greyed out, as the server does when it makes the page.
   const closeMenus = () => document.querySelectorAll(".menu").forEach(m => m.remove());
   const reviewButtons = [...document.querySelectorAll(".review")];
-  const takeClone = dir => reviewButtons.forEach(btn => {{
-    const dirs = (btn.dataset.dirs || "").split("/");
-    if (!dirs.includes(dir)) return;
-    btn.dataset.dirs = dirs.filter(d => d !== dir).join("/");
-    if (!btn.dataset.dirs) {{
-      btn.disabled = true;
-      btn.title = "Claude Code is running in every clone of the repository";
-    }}
-  }});
+  const REVIEW_TITLE = "Pick a clone of the repository; a terminal opens there,"
+    + " checks out the branch, and starts a review of the PR with Claude Code";
+  const setClones = (btn, dirs, why) => {{
+    btn.dataset.dirs = dirs.join("/");
+    btn.disabled = !dirs.length;
+    btn.title = dirs.length ? REVIEW_TITLE : why;
+  }};
+  // The clones taken from this page, and when: the session starts only
+  // after the checkout, so for a while the server still sees them as free.
+  const taken = {{}};
+  const takeClone = dir => {{
+    taken[dir] = Date.now();
+    reviewButtons.forEach(btn => {{
+      const dirs = (btn.dataset.dirs || "").split("/").filter(d => d);
+      if (dirs.includes(dir))
+        setClones(btn, dirs.filter(d => d !== dir),
+                  "Claude Code is running in every clone of the repository");
+    }});
+  }};
+  // The lists are made with the page, and sessions start and end after
+  // that: a clone whose session was closed is free again, and one a session
+  // was started in elsewhere is taken. So ask the server for the lists as
+  // they are now, when the page gets the focus (coming back from the
+  // terminal, say) and when "review" is clicked. On failure they stay.
+  const refreshClones = async () => {{
+    try {{
+      const choices = await (await fetch("/clones")).json();
+      reviewButtons.forEach(btn => {{
+        const choice = choices[btn.dataset.review.split("#")[0]];
+        if (!choice) return;
+        const dirs = choice[0].filter(d => !(Date.now() - (taken[d] || 0) < 120000));
+        setClones(btn, dirs, choice[1]
+          || "Claude Code is running in every clone of the repository");
+      }});
+    }} catch (err) {{}}
+  }};
+  window.addEventListener("focus", refreshClones);
   // Ask the server to do something on this computer; the answer is the
   // error message, empty when it worked.
   const post = async (path, fields) => {{
@@ -362,11 +390,13 @@ PAGE = """<!DOCTYPE html>
     if (error) alert(error); else takeClone(dir);
     setTimeout(() => {{ note.textContent = ""; }}, 2500);
   }};
-  reviewButtons.forEach(btn => btn.addEventListener("click", e => {{
+  reviewButtons.forEach(btn => btn.addEventListener("click", async e => {{
     e.stopPropagation();  // or the click would close the list it opens
     const wasOpen = btn.parentNode.querySelector(".menu");
     closeMenus();
     if (wasOpen) return;
+    await refreshClones();
+    if (btn.disabled) return;
     const menu = document.createElement("div");
     menu.className = "menu";
     const head = document.createElement("div");
@@ -385,7 +415,8 @@ PAGE = """<!DOCTYPE html>
   // "Review next" starts a review of the first PR in the table, in the
   // order it is sorted in, that waits for my review (not reviewed yet, or
   // changed since) and has no session on it, in the first free clone.
-  document.getElementById("next").addEventListener("click", () => {{
+  document.getElementById("next").addEventListener("click", async () => {{
+    await refreshClones();
     const btn = [...tbody.querySelectorAll(".review")].find(b =>
       !b.disabled && ["todo", "updated"].includes(b.dataset.mine)
       && !("running" in b.dataset));
@@ -810,6 +841,33 @@ def current_branch(directory):
         return ""
 
 
+def review_choice(repo, directories, free):
+    """Return what the "review" button of a repository's PRs offers: (names
+    of the clones free for a review, why there are none)."""
+    if free:
+        why = ""
+    elif directories:
+        why = ("Claude Code is running in every clone of the repository"
+               f" ({', '.join(d.name for d in directories)})")
+    else:
+        why = f"No clone of {repo} in {REPOS_DIR}; see README.txt"
+    return [d.name for d in free], why
+
+
+def review_choices(data):
+    """Return {repository name: [names of the free clones, why there are
+    none]} as it is now. The page asks for it when it gets the focus and
+    when "review" is clicked, since sessions start and end after the page
+    was made."""
+    sessions = claude_sessions()
+    choices = {}
+    for repo in (data or {"prs": {}})["prs"]:
+        directories = clones(repo)
+        choices[repo.split("/")[1]] = review_choice(
+            repo, directories, free_clones(directories, sessions))
+    return choices
+
+
 def page_state(data):
     """Return what the PR cells show besides the PR data, worked out once
     per page, not per PR:
@@ -824,14 +882,7 @@ def page_state(data):
     for repo, prs in data["prs"].items():
         directories = clones(repo)
         free = free_clones(directories, sessions)
-        if free:
-            why = ""
-        elif directories:
-            why = ("Claude Code is running in every clone of the repository"
-                   f" ({', '.join(d.name for d in directories)})")
-        else:
-            why = f"No clone of {repo} in {REPOS_DIR}; see README.txt"
-        choices[repo.split("/")[1]] = ([d.name for d in free], why)
+        choices[repo.split("/")[1]] = review_choice(repo, directories, free)
         for directory in directories:
             if directory in free:
                 continue
@@ -1260,6 +1311,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(pr_popup(
                 Handler.data, first(query, "pr"), Handler.token, first(query, "since")
             ))
+            return
+        if url.path == "/clones":
+            self.send_json(review_choices(Handler.data))
             return
         if url.path != "/":
             self.send_error(404)

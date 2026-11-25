@@ -264,9 +264,10 @@ It lists your clones of the PR's repository (see REVIEW_REPOS_DIR above)
 that are free, that is, have no Claude Code session running in them or in
 a directory inside them, so that the checkout doesn't switch the branch
 under a running session. When no clone is free the link is greyed out;
-hover over it for the reason. The list is made when the page loads, so
-reload the page after closing a session; a clone that was taken since is
-refused with a message.
+hover over it for the reason. The list is brought up to date when you come
+back to the page and when you click "review", so a clone is offered again
+as soon as its session is closed, with no reload; a clone that was taken
+in the moment between is refused with a message.
 
 Picking a clone takes a Terminal tab (macOS only) that is idle, that is, a
 shell at its prompt with nothing running in it (so not one with a Claude
