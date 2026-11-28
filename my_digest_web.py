@@ -1194,6 +1194,13 @@ RUN_SCRIPT = [
 ]
 
 
+# Ctrl-U, the shell's "kill line" key. Terminal types the command at the
+# tab's prompt, after anything that was typed there and not entered: with
+# "git checkout " left on the line the shell ran "git checkout cd ...".
+# Sent first, this clears the line.
+CLEAR_LINE = "\x15"
+
+
 def open_terminal(command):
     """Run the shell command in an idle Terminal tab, or in a new Terminal
     window when no tab is idle, and bring it to the front; see RUN_SCRIPT.
@@ -1203,6 +1210,7 @@ def open_terminal(command):
     args = ["osascript"]
     for line in RUN_SCRIPT:
         args += ["-e", line]
+    command = CLEAR_LINE + command
     try:
         subprocess.run(args + [command], check=True, capture_output=True,
                        text=True, timeout=60)
