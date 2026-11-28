@@ -313,9 +313,10 @@ and so does one whose current commit you approved. The team digest shows the PR'
 
 The total of all this is the PR's "weighted lines": up to 60 scores 1, up
 to 200 scores 2, up to 500 scores 3, up to 1200 scores 4, and more scores
-5. The web page shows the number next to the score and sorts the Effort
-column by it, so PRs with the same score are in order too; --by-effort
-sorts by it as well.
+5. The web page doesn't show the number, only the score, with the files
+changed and the TLC on the line below it; it sorts the Effort column by the
+number, so PRs with the same score are in order too, and --by-effort sorts
+by it as well.
 
 The score can't tell a refactoring that moves code around from one that
 changes what the code does, so read it as "how much is there to read", not

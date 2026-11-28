@@ -671,11 +671,6 @@ def pr_cell(row, state):
             for k in row["jira"]
         )
         parts.append(f"<div>{links}</div>")
-    if row["size"]:
-        parts.append(
-            '<div class="size" title="Files changed, and total lines changed'
-            f' (added plus deleted)">{escape(row["size"])}</div>'
-        )
     parts.append(review_notes(row, state))
     return "".join(parts)
 
@@ -1238,28 +1233,33 @@ def pending_reviews(row):
 
 
 def effort_cell(row):
-    """Return the Effort column's cell: the score and, a line each to keep
-    the column narrow, what it was made from. It sorts by the effective lines behind the score, so PRs with the same
-    score are ordered too; a PR without an estimate sorts last."""
+    """Return the Effort column's cell: the score, where the reader stands
+    as a reviewer (when they reviewed the PR), the PR's size and then, a
+    line each to keep the column narrow, what the score was made from. It
+    sorts by the weighted lines behind the score
+    (not shown), so PRs with the same score are ordered too; a PR without an
+    estimate sorts last."""
     effort = row["effort"]
+    size = (
+        '<div class="size" title="Files changed, and total lines changed'
+        f' (added plus deleted)">{escape(row["size"])}</div>'
+    ) if row["size"] else ""
     if not effort:
-        return '<td class="effort" data-sort="99999999">-</td>'
-    why = "".join(
-        f'<div class="size{" updated" if part == review_effort.UPDATED else ""}">'
-        f"{escape(part)}</div>"
-        for part in effort["parts"]
+        return f'<td class="effort" data-sort="99999999">-{size}</td>'
+    state = effort["state"]
+    updated = " updated" if state == review_effort.UPDATED else ""
+    state_line = (
+        f'<div class="size{updated}">{escape(state)}</div>' if state else ""
     )
-    # The number the column sorts by, so the order within a score shows;
-    # left out when there is nothing new to read.
-    weighted = (
-        ' <span class="size" title="What the score is made from and the'
-        " column sorts by: code lines in full, test lines at 30%, docs and"
-        ' build lines at 10%, with the adjustments listed below">'
-        f'{effort["lines"]} weighted lines</span>'
-    ) if effort["lines"] else ""
+    # The state is the first of the parts; it has its own line above.
+    why = "".join(
+        f'<div class="size">{escape(part)}</div>'
+        for part in effort["parts"][1 if state else 0:]
+    )
     return (
         f'<td class="effort" data-sort="{effort["lines"]:08d}">'
-        f'<span class="score">{effort["score"]}</span>{weighted}{why}</td>'
+        f'<span class="score">{effort["score"]}</span>'
+        f"{state_line}{size}{why}</td>"
     )
 
 

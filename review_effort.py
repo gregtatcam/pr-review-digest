@@ -100,10 +100,11 @@ def plural(n, word):
 
 
 def estimate(pr, my_status=None):
-    """Return {"score", "lines", "why", "parts"} for a PR as DETAILS_QUERY
-    returns it: the score from 1 to 5, the effective lines behind it (to
-    order PRs of the same score), and a short explanation, as one string and
-    as the list of its parts. my_status says where the reader stands as a
+    """Return {"score", "lines", "why", "parts", "state"} for a PR as
+    DETAILS_QUERY returns it: the score from 1 to 5, the effective lines
+    behind it (to order PRs of the same score), a short explanation, as one
+    string and as the list of its parts, and the first of those parts when
+    it says where the reader stands ("" otherwise). my_status says that, as a
     reviewer of the PR, if they reviewed it: "approved" (the current commit),
     "unchanged" (reviewed, and the PR has no commits since), or "updated"
     (reviewed, and it has). Returns None for PR data without the list of
@@ -179,16 +180,20 @@ def estimate(pr, my_status=None):
     if thin_description(pr.get("body")):
         lines *= THIN_DESCRIPTION
         why.append("thin description")
+    # Where the reader stands goes first, so that it shows where the
+    # explanation is cut short; the breakdown of the PR stays after it.
+    state = ""
     if my_status == "approved":
         lines = 0
-        why = ["you approved this commit"]
+        state = "you approved this commit"
     elif my_status == "unchanged":
         lines = 0
-        why = ["reviewed, no changes"]
+        state = "reviewed, no changes"
     elif my_status == "updated":
-        # First, so that it shows where the explanation is cut short.
         lines *= REREVIEW
-        why.insert(0, UPDATED)
+        state = UPDATED
+    if state:
+        why.insert(0, state)
 
     score = 1 + sum(lines > level for level in LEVELS)
     return {
@@ -196,6 +201,7 @@ def estimate(pr, my_status=None):
         "lines": round(lines),
         "why": ", ".join(why),
         "parts": why,
+        "state": state,
     }
 
 
